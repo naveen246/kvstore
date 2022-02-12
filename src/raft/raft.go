@@ -7,7 +7,7 @@ package raft
 //
 // rf = Make(...)
 //   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
+// rf.Start(command interface{}) (index, term, isLeader)
 //   start agreement on a new log entry
 // rf.GetState() (term, isLeader)
 //   ask a Raft for its current term, and whether it thinks it is leader
@@ -34,8 +34,10 @@ import (
 	"6.824/labrpc"
 )
 
+const DebugMode = false
+
 //
-// as each Raft peer becomes aware that successive log entries are
+// ApplyMsg : as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
 // CommandValid to true to indicate that the ApplyMsg contains a newly
@@ -90,7 +92,7 @@ func logFatal(err error) {
 }
 
 //
-// A Go object implementing a single Raft peer.
+// Raft : A Go object implementing a single Raft peer.
 //
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -99,18 +101,37 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
+	// applyCh is the channel where this node is going to report committed log
+	// entries. It's passed in by the client during construction.
+	applyCh chan<- ApplyMsg
+
+	// newApplyReadyCh is an internal notification channel used by goroutines
+	// that commit new entries to the log to notify that these entries may be sent
+	// on applyCh.
+	newApplyReadyCh chan struct{}
+
+	// triggerAECh is an internal notification channel used to trigger
+	// sending new AEs to followers when interesting changes occurred.
+	triggerAECh chan struct{}
+
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	// Persistent raft state
+	// Persistent raft state on all servers
 	currentTerm int
 	votedFor    int
 	log         []LogEntry
 
-	// Volatile raft state
+	// Volatile raft state on all servers
+	commitIndex        int
+	lastApplied        int
 	state              NodeState
 	electionResetEvent time.Time
+
+	// Volatile raft state on leaders
+	nextIndex  map[int]int
+	matchIndex map[int]int
 }
 
 // lastLogIndexAndTerm returns the last log index and the last log entry's term
@@ -125,7 +146,7 @@ func (rf *Raft) lastLogIndexAndTerm() (int, int) {
 	return -1, -1
 }
 
-// return currentTerm and whether this server
+// GetState : return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
@@ -187,8 +208,8 @@ func (rf *Raft) readPersist(data []byte) {
 }
 
 //
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// have more recent info since it communicate the snapshot on applyCh.
+// CondInstallSnapshot A service wants to switch to snapshot.  Only do so if Raft hasn't
+// had more recent info since it communicate the snapshot on applyCh.
 //
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 
@@ -197,7 +218,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	return true
 }
 
-// the service says it has created a snapshot that has
+// Snapshot : the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
@@ -207,7 +228,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 }
 
 //
-// example RequestVote RPC arguments structure.
+// RequestVoteArgs : RequestVote RPC arguments structure.
 // field names must start with capital letters!
 //
 type RequestVoteArgs struct {
@@ -219,7 +240,7 @@ type RequestVoteArgs struct {
 }
 
 //
-// example RequestVote RPC reply structure.
+// RequestVoteReply : RequestVote RPC reply structure.
 // field names must start with capital letters!
 //
 type RequestVoteReply struct {
@@ -263,7 +284,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 //
-// example code to send a RequestVote RPC to a server.
+// send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
 // fills in *reply with RPC reply, so caller should
@@ -281,7 +302,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // can't be reached, a lost request, or a lost reply.
 //
 // Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
+// handler function on the server side does not return.  Thus, there
 // is no need to implement your own timeouts around Call().
 //
 // look at the comments in ../labrpc/labrpc.go for more details.
@@ -296,10 +317,135 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+// AppendEntriesArgs See figure 2 in the paper.
+type AppendEntriesArgs struct {
+	Term     int
+	LeaderId int
+
+	PrevLogIndex int
+	PrevLogTerm  int
+	Entries      []LogEntry
+	LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+	Term    int
+	Success bool
+
+	// Faster conflict resolution optimization (described near the end of section
+	// 5.3 in the paper.)
+	ConflictIndex int
+	ConflictTerm  int
+}
+
 //
+// AppendEntries RPC handler.
+//
+func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if rf.killed() {
+		return
+	}
+	rf.dLog("AppendEntries: %+v", args)
+
+	if args.Term > rf.currentTerm {
+		rf.dLog("... term out of date in AppendEntries")
+		rf.becomeFollower(args.Term)
+	}
+
+	reply.Success = false
+	if args.Term == rf.currentTerm {
+		if args.LeaderId != rf.me && rf.state != Follower {
+			rf.becomeFollower(args.Term)
+		}
+		rf.electionResetEvent = time.Now()
+
+		// check if our log contain an entry at PrevLogIndex whose term matches
+		// PrevLogTerm
+		if args.PrevLogIndex == -1 ||
+			(args.PrevLogIndex < len(rf.log) && args.PrevLogTerm == rf.log[args.PrevLogIndex].Term) {
+			reply.Success = true
+
+			// Find an insertion point - where there's a term mismatch between
+			// the existing log starting at PrevLogIndex+1 and the new entries sent
+			// in the RPC.
+			logInsertIndex := args.PrevLogIndex + 1
+			newEntriesIndex := 0
+
+			for {
+				if logInsertIndex >= len(rf.log) || newEntriesIndex >= len(args.Entries) {
+					break
+				}
+				if rf.log[logInsertIndex].Term != args.Entries[newEntriesIndex].Term {
+					break
+				}
+				logInsertIndex++
+				newEntriesIndex++
+			}
+			// At the end of this loop:
+			// - logInsertIndex points at the end of the log, or an index where the
+			//   term mismatches with an entry from the leader
+			// - newEntriesIndex points at the end of Entries, or an index where the
+			//   term mismatches with the corresponding log entry
+			if newEntriesIndex < len(args.Entries) {
+				rf.dLog("... inserting entries %v from index %d", args.Entries[newEntriesIndex:], logInsertIndex)
+				rf.log = append(rf.log[:logInsertIndex], args.Entries[newEntriesIndex:]...)
+				rf.dLog("... log is now: %v", rf.log)
+			}
+
+			// Set commitIndex
+			if args.LeaderCommit > rf.commitIndex {
+				rf.commitIndex = intMin(args.LeaderCommit, len(rf.log)-1)
+				rf.dLog("... setting commitIndex=%d", rf.commitIndex)
+				rf.newApplyReadyCh <- struct{}{}
+			}
+		} else {
+			// No match for PrevLogIndex/PrevLogTerm. Populate
+			// ConflictIndex/ConflictTerm to help the leader bring us up to date
+			// quickly.
+			if args.PrevLogIndex >= len(rf.log) {
+				reply.ConflictIndex = len(rf.log)
+				reply.ConflictTerm = -1
+			} else {
+				// PrevLogIndex points within our log, but PrevLogTerm doesn't match
+				// rf.log[PrevLogIndex].
+				reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+
+				var i int
+				for i = args.PrevLogIndex - 1; i >= 0; i-- {
+					if rf.log[i].Term != reply.ConflictTerm {
+						break
+					}
+				}
+				reply.ConflictIndex = i + 1
+			}
+		}
+
+	}
+
+	reply.Term = rf.currentTerm
+	rf.persist()
+	rf.dLog("AppendEntries reply: %+v", *reply)
+}
+
+func intMin(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	return ok
+}
+
+//
+// Start agreement on the next command
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
-// server isn't the leader, returns false. otherwise start the
+// server isn't the leader, returns false. otherwise, start the
 // agreement and return immediately. there is no guarantee that this
 // command will ever be committed to the Raft log, since the leader
 // may fail or lose an election. even if the Raft instance has been killed,
@@ -313,15 +459,30 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	isLeader := false
 
 	// Your code here (2B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 
+	if rf.state == Leader {
+		rf.dLog("Start agreement on next command: %v\t log: %v", command, rf.log)
+		rf.log = append(rf.log, LogEntry{
+			Command: command,
+			Term:    rf.currentTerm,
+		})
+		rf.persist()
+		rf.triggerAECh <- struct{}{}
+		rf.dLog("... log=%v", rf.log)
+		index = len(rf.log) - 1
+		term = rf.currentTerm
+		isLeader = true
+	}
 	return index, term, isLeader
 }
 
 //
-// the tester doesn't halt goroutines created by Raft after each test,
+// Kill node the tester doesn't halt goroutines created by Raft after each test,
 // but it does call the Kill() method. your code can use killed() to
 // check whether Kill() has been called. the use of atomic avoids the
 // need for a lock.
@@ -334,6 +495,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.dLog("node dead")
+	close(rf.newApplyReadyCh)
 }
 
 func (rf *Raft) killed() bool {
@@ -343,11 +506,11 @@ func (rf *Raft) killed() bool {
 
 // electionTimeout generates a pseudo-random election timeout duration.
 func (rf *Raft) electionTimeout() time.Duration {
-	return time.Duration(150+rand.Intn(150)) * time.Millisecond
+	return time.Duration(250+rand.Intn(150)) * time.Millisecond
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
-// heartsbeats recently.
+// heartbeats recently.
 func (rf *Raft) ticker() {
 	timeoutDuration := rf.electionTimeout()
 	rf.mu.Lock()
@@ -402,7 +565,7 @@ func (rf *Raft) startElection() {
 	votesReceived := 1
 
 	// Send RequestVote RPCs to all other servers concurrently.
-	for id, peer := range rf.peers {
+	for id := range rf.peers {
 		go func(peerId int) {
 			rf.mu.Lock()
 			savedLastLogIndex, savedLastLogTerm := rf.lastLogIndexAndTerm()
@@ -415,7 +578,7 @@ func (rf *Raft) startElection() {
 				LastLogTerm:  savedLastLogTerm,
 			}
 
-			rf.dLog("sending RequestVote to %d-%v: %+v", peerId, peer, args)
+			rf.dLog("sending RequestVote to %d: %+v", peerId, args)
 			var reply RequestVoteReply
 			ok := rf.sendRequestVote(peerId, &args, &reply)
 			if ok {
@@ -452,6 +615,7 @@ func (rf *Raft) startElection() {
 // Expects rf.mu to be locked.
 func (rf *Raft) becomeFollower(term int) {
 	rf.state = Follower
+	rf.dLog("becomes Follower with term=%d; log=%v", term, rf.log)
 	rf.currentTerm = term
 	rf.votedFor = -1
 	rf.electionResetEvent = time.Now()
@@ -459,11 +623,152 @@ func (rf *Raft) becomeFollower(term int) {
 	go rf.ticker()
 }
 
+// startLeader switches node into a leader state and begins process of heartbeats.
+// Expects rf.mu to be locked.
 func (rf *Raft) startLeader() {
 	rf.state = Leader
+
+	for peerId := range rf.peers {
+		rf.nextIndex[peerId] = len(rf.log)
+		rf.matchIndex[peerId] = -1
+	}
+	rf.dLog("becomes Leader; term=%d, nextIndex=%v, matchIndex=%v; log=%v", rf.currentTerm, rf.nextIndex, rf.matchIndex, rf.log)
+
+	// This goroutine runs in the background and sends AEs to peers:
+	// * Whenever something is sent on triggerAEChan
+	// * ... Or every 50 ms, if no events occur on triggerAEChan
+	go func(heartbeatTimeout time.Duration) {
+		rf.leaderSendAEs()
+
+		t := time.NewTimer(heartbeatTimeout)
+		defer t.Stop()
+		for {
+			doSend := false
+			select {
+			case <-t.C:
+				doSend = true
+
+				// Reset timer to fire again after heartbeatTimeout.
+				t.Stop()
+				t.Reset(heartbeatTimeout)
+			case _, ok := <-rf.triggerAECh:
+				if ok {
+					doSend = true
+				} else {
+					return
+				}
+
+				// Reset timer for heartbeatTimeout.
+				if !t.Stop() {
+					<-t.C
+				}
+				t.Reset(heartbeatTimeout)
+			}
+
+			if doSend {
+				rf.mu.Lock()
+				if rf.state != Leader {
+					rf.mu.Unlock()
+					return
+				}
+				rf.mu.Unlock()
+				rf.leaderSendAEs()
+			}
+		}
+	}(200 * time.Millisecond)
 }
 
-const DebugMode = false
+// leaderSendAEs sends a round of AEs to all peers, collects their
+// replies and adjusts node's state.
+func (rf *Raft) leaderSendAEs() {
+	rf.mu.Lock()
+	savedCurrentTerm := rf.currentTerm
+	rf.mu.Unlock()
+
+	for peerId := range rf.peers {
+		go func(peerId int) {
+			rf.mu.Lock()
+			ni := rf.nextIndex[peerId]
+			prevLogIndex := ni - 1
+			prevLogTerm := -1
+			if prevLogIndex >= 0 {
+				prevLogTerm = rf.log[prevLogIndex].Term
+			}
+			entries := rf.log[ni:]
+
+			args := AppendEntriesArgs{
+				Term:         savedCurrentTerm,
+				LeaderId:     rf.me,
+				PrevLogIndex: prevLogIndex,
+				PrevLogTerm:  prevLogTerm,
+				Entries:      entries,
+				LeaderCommit: rf.commitIndex,
+			}
+			rf.mu.Unlock()
+			rf.dLog("sending AppendEntries to %v: ni=%d, args=%+v", peerId, ni, args)
+			var reply AppendEntriesReply
+			ok := rf.sendAppendEntries(peerId, args, &reply)
+			if ok {
+				rf.mu.Lock()
+				defer rf.mu.Unlock()
+				if reply.Term > savedCurrentTerm {
+					rf.dLog("term out of date in heartbeat reply")
+					rf.becomeFollower(reply.Term)
+					return
+				}
+
+				if rf.state == Leader && savedCurrentTerm == reply.Term {
+					if reply.Success {
+						rf.nextIndex[peerId] = ni + len(entries)
+						rf.matchIndex[peerId] = rf.nextIndex[peerId] - 1
+
+						savedCommitIndex := rf.commitIndex
+						for i := rf.commitIndex + 1; i < len(rf.log); i++ {
+							if rf.log[i].Term == rf.currentTerm {
+								matchCount := 1
+								for peerId := range rf.peers {
+									if rf.matchIndex[peerId] >= i {
+										matchCount++
+									}
+								}
+								if matchCount*2 > len(rf.peers)+1 {
+									rf.commitIndex = i
+								}
+							}
+						}
+						rf.dLog("AppendEntries reply from %d success: nextIndex := %v, matchIndex := %v; commitIndex := %d", peerId, rf.nextIndex, rf.matchIndex, rf.commitIndex)
+						if rf.commitIndex != savedCommitIndex {
+							rf.dLog("leader sets commitIndex := %d", rf.commitIndex)
+							// Commit index changed: the leader considers new entries to be
+							// committed. Send new entries on the commit channel to this
+							// leader's clients, and notify followers by sending them AEs.
+							rf.newApplyReadyCh <- struct{}{}
+							rf.triggerAECh <- struct{}{}
+						}
+					} else {
+						if reply.ConflictTerm >= 0 {
+							lastIndexOfTerm := -1
+							for i := len(rf.log) - 1; i >= 0; i-- {
+								if rf.log[i].Term == reply.ConflictTerm {
+									lastIndexOfTerm = i
+									break
+								}
+							}
+							if lastIndexOfTerm >= 0 {
+								rf.nextIndex[peerId] = lastIndexOfTerm + 1
+							} else {
+								rf.nextIndex[peerId] = reply.ConflictIndex
+							}
+						} else {
+							rf.nextIndex[peerId] = reply.ConflictIndex
+						}
+						rf.dLog("AppendEntries reply from %d !success: nextIndex := %d", peerId, ni-1)
+					}
+				}
+			}
+		}(peerId)
+	}
+}
 
 // dLog logs a debugging message if DebugMode is true.
 func (rf *Raft) dLog(format string, args ...interface{}) {
@@ -473,8 +778,43 @@ func (rf *Raft) dLog(format string, args ...interface{}) {
 	}
 }
 
+// applyChSender is responsible for sending committed entries on
+// rf.applyCh. It watches newApplyReadyCh for notifications and calculates
+// which new entries are ready to be sent. This method should run in a separate
+// background goroutine; rf.applyCh may be buffered and will limit how fast
+// the client consumes new committed entries. Returns when newApplyReadyCh is
+// closed.
+func (rf *Raft) applyChSender() {
+	for range rf.newApplyReadyCh {
+		// Find which entries we have to apply.
+		rf.mu.Lock()
+		// savedTerm := rf.currentTerm
+		savedLastApplied := rf.lastApplied
+		var entries []LogEntry
+		if rf.commitIndex > rf.lastApplied {
+			entries = rf.log[rf.lastApplied+1 : rf.commitIndex+1]
+			rf.lastApplied = rf.commitIndex
+		}
+		rf.mu.Unlock()
+		rf.dLog("applyChSender entries=%v, savedLastApplied=%d", entries, savedLastApplied)
+
+		for i, entry := range entries {
+			rf.applyCh <- ApplyMsg{
+				CommandValid:  true,
+				Command:       entry.Command,
+				CommandIndex:  savedLastApplied + i + 1,
+				SnapshotValid: false,
+				Snapshot:      nil,
+				SnapshotTerm:  0,
+				SnapshotIndex: 0,
+			}
+		}
+	}
+	rf.dLog("applyChSender done")
+}
+
 //
-// the service or tester wants to create a Raft server. the ports
+// Make : the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
 // server's port is peers[me]. all the servers' peers[] arrays
 // have the same order. persister is a place for this server to
@@ -490,6 +830,20 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.applyCh = applyCh
+	rf.newApplyReadyCh = make(chan struct{}, 16)
+	rf.triggerAECh = make(chan struct{}, 1)
+	rf.state = Follower
+	rf.votedFor = -1
+	rf.commitIndex = -1
+	rf.lastApplied = -1
+	rf.nextIndex = make(map[int]int)
+	rf.matchIndex = make(map[int]int)
+	rf.log = []LogEntry{{
+		Command: 100,
+		Term:    0,
+	}}
+
 	atomic.StoreInt32(&rf.dead, 0)
 
 	// Your initialization code here (2A, 2B, 2C).
@@ -505,5 +859,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		rf.ticker()
 	}()
 
+	go rf.applyChSender()
 	return rf
 }
