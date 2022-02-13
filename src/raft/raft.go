@@ -36,6 +36,12 @@ import (
 
 const DebugMode = false
 
+const (
+	ElectionTimeout  = 300 * time.Millisecond
+	HeartBeatTimeout = 150 * time.Millisecond
+	ElectionTicker   = 10 * time.Millisecond
+)
+
 //
 // ApplyMsg : as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -167,7 +173,6 @@ func (rf *Raft) GetState() (int, bool) {
 // Expects rf.mu to be locked.
 func (rf *Raft) persist() {
 	// Your code here (2C).
-
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 
@@ -180,6 +185,7 @@ func (rf *Raft) persist() {
 
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
+	rf.dLog("persist(): time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
 }
 
 //
@@ -275,6 +281,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.electionResetEvent = time.Now()
+		rf.dLog("electionResetEvent in RequestVote")
 	} else {
 		reply.VoteGranted = false
 	}
@@ -348,6 +355,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		return
 	}
 	rf.dLog("AppendEntries: %+v", args)
+	rf.dLog("AppendEntries(): time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
 
 	if args.Term > rf.currentTerm {
 		rf.dLog("... term out of date in AppendEntries")
@@ -360,7 +368,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			rf.becomeFollower(args.Term)
 		}
 		rf.electionResetEvent = time.Now()
-
+		rf.dLog("electionResetEvent in AppendEntries")
 		// check if our log contain an entry at PrevLogIndex whose term matches
 		// PrevLogTerm
 		if args.PrevLogIndex == -1 ||
@@ -427,6 +435,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	reply.Term = rf.currentTerm
 	rf.persist()
 	rf.dLog("AppendEntries reply: %+v", *reply)
+	rf.dLog("time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
 }
 
 func intMin(a, b int) int {
@@ -464,9 +473,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-
+	if rf.killed() {
+		return index, term, isLeader
+	}
 	if rf.state == Leader {
-		rf.dLog("Start agreement on next command: %v\t log: %v", command, rf.log)
+		rf.dLog("Start agreement on next command: %v\t log: %v at node %v", command, rf.log, rf.me)
 		rf.log = append(rf.log, LogEntry{
 			Command: command,
 			Term:    rf.currentTerm,
@@ -497,6 +508,8 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.dLog("node dead")
 	close(rf.newApplyReadyCh)
+	close(rf.applyCh)
+	close(rf.triggerAECh)
 }
 
 func (rf *Raft) killed() bool {
@@ -506,7 +519,8 @@ func (rf *Raft) killed() bool {
 
 // electionTimeout generates a pseudo-random election timeout duration.
 func (rf *Raft) electionTimeout() time.Duration {
-	return time.Duration(250+rand.Intn(150)) * time.Millisecond
+	r := time.Duration(rand.Int63()) % ElectionTimeout
+	return ElectionTimeout + r
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
@@ -521,11 +535,11 @@ func (rf *Raft) ticker() {
 	// This loops until either:
 	// - we discover the election timer is no longer needed, or
 	// - the election timer expires and this raft node becomes a candidate
-	timeTicker := time.NewTicker(10 * time.Millisecond)
-	defer timeTicker.Stop()
+	electionTicker := time.NewTicker(ElectionTicker)
+	defer electionTicker.Stop()
 	for rf.killed() == false {
 		// Your code here to check if a leader election should be started
-		<-timeTicker.C
+		<-electionTicker.C
 		rf.mu.Lock()
 		if rf.state != Candidate && rf.state != Follower {
 			rf.dLog("in election timer state=%s, bailing out", rf.state)
@@ -543,6 +557,7 @@ func (rf *Raft) ticker() {
 		// someone for the duration of the timeout.
 		elapsed := time.Since(rf.electionResetEvent)
 		if elapsed >= timeoutDuration {
+			rf.dLog("elapsed: %v, timeoutDuration: %v, electionResetEvent: %v", elapsed, timeoutDuration, rf.electionResetEvent)
 			rf.startElection()
 			rf.mu.Unlock()
 			return
@@ -559,6 +574,7 @@ func (rf *Raft) startElection() {
 	rf.currentTerm += 1
 	savedCurrentTerm := rf.currentTerm
 	rf.electionResetEvent = time.Now()
+	rf.dLog("electionResetEvent in startElection")
 	rf.votedFor = rf.me
 	rf.dLog("becomes Candidate (currentTerm=%d); log=%v", savedCurrentTerm, rf.log)
 
@@ -619,7 +635,7 @@ func (rf *Raft) becomeFollower(term int) {
 	rf.currentTerm = term
 	rf.votedFor = -1
 	rf.electionResetEvent = time.Now()
-
+	rf.dLog("electionResetEvent in becomeFollower")
 	go rf.ticker()
 }
 
@@ -635,8 +651,8 @@ func (rf *Raft) startLeader() {
 	rf.dLog("becomes Leader; term=%d, nextIndex=%v, matchIndex=%v; log=%v", rf.currentTerm, rf.nextIndex, rf.matchIndex, rf.log)
 
 	// This goroutine runs in the background and sends AEs to peers:
-	// * Whenever something is sent on triggerAEChan
-	// * ... Or every 50 ms, if no events occur on triggerAEChan
+	// * Whenever something is sent on triggerAECh
+	// * ... Or every 150 ms, if no events occur on triggerAECh
 	go func(heartbeatTimeout time.Duration) {
 		rf.leaderSendAEs()
 
@@ -647,14 +663,16 @@ func (rf *Raft) startLeader() {
 			select {
 			case <-t.C:
 				doSend = true
-
+				rf.dLog("heartbeat")
 				// Reset timer to fire again after heartbeatTimeout.
 				t.Stop()
 				t.Reset(heartbeatTimeout)
 			case _, ok := <-rf.triggerAECh:
 				if ok {
 					doSend = true
+					rf.dLog("heartbeat: read on triggerAECh")
 				} else {
+					rf.dLog("heartbeat: return")
 					return
 				}
 
@@ -672,10 +690,11 @@ func (rf *Raft) startLeader() {
 					return
 				}
 				rf.mu.Unlock()
+				rf.dLog("Call leaderSendAEs inside heartbeat: time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
 				rf.leaderSendAEs()
 			}
 		}
-	}(200 * time.Millisecond)
+	}(HeartBeatTimeout)
 }
 
 // leaderSendAEs sends a round of AEs to all peers, collects their
@@ -840,7 +859,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make(map[int]int)
 	rf.matchIndex = make(map[int]int)
 	rf.log = []LogEntry{{
-		Command: 100,
+		Command: byte(1),
 		Term:    0,
 	}}
 
