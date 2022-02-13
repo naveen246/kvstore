@@ -34,7 +34,7 @@ import (
 	"6.824/labrpc"
 )
 
-const DebugMode = false
+const DebugMode = true
 
 const (
 	ElectionTimeout  = 300 * time.Millisecond
@@ -472,23 +472,22 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.killed() {
-		return index, term, isLeader
-	}
-	if rf.state == Leader {
+	if rf.state == Leader && !rf.killed() {
 		rf.dLog("Start agreement on next command: %v\t log: %v at node %v", command, rf.log, rf.me)
 		rf.log = append(rf.log, LogEntry{
 			Command: command,
 			Term:    rf.currentTerm,
 		})
 		rf.persist()
-		rf.triggerAECh <- struct{}{}
 		rf.dLog("... log=%v", rf.log)
 		index = len(rf.log) - 1
 		term = rf.currentTerm
 		isLeader = true
+		rf.mu.Unlock()
+		rf.triggerAECh <- struct{}{}
+		return index, term, isLeader
 	}
+	rf.mu.Unlock()
 	return index, term, isLeader
 }
 
@@ -619,6 +618,8 @@ func (rf *Raft) startElection() {
 						}
 					}
 				}
+			} else {
+				rf.dLog("sendRequestVote failed")
 			}
 		}(id)
 	}
@@ -684,7 +685,9 @@ func (rf *Raft) startLeader() {
 			}
 
 			if doSend {
+				rf.dLog("doSend AppendEntries from leader to peers")
 				rf.mu.Lock()
+				rf.dLog("doSend mu locked")
 				if rf.state != Leader {
 					rf.mu.Unlock()
 					return
@@ -784,6 +787,8 @@ func (rf *Raft) leaderSendAEs() {
 						rf.dLog("AppendEntries reply from %d !success: nextIndex := %d", peerId, ni-1)
 					}
 				}
+			} else {
+				rf.dLog("sendAppendEntries failed")
 			}
 		}(peerId)
 	}
