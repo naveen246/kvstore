@@ -34,11 +34,11 @@ import (
 	"6.824/labrpc"
 )
 
-const DebugMode = true
+const DebugMode = false
 
 const (
 	ElectionTimeout  = 300 * time.Millisecond
-	HeartBeatTimeout = 150 * time.Millisecond
+	HeartBeatTimeout = 200 * time.Millisecond
 	ElectionTicker   = 10 * time.Millisecond
 )
 
@@ -653,7 +653,7 @@ func (rf *Raft) startLeader() {
 
 	// This goroutine runs in the background and sends AEs to peers:
 	// * Whenever something is sent on triggerAECh
-	// * ... Or every 150 ms, if no events occur on triggerAECh
+	// * ... Or every 200 ms, if no events occur on triggerAECh
 	go func(heartbeatTimeout time.Duration) {
 		rf.leaderSendAEs()
 
