@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"runtime"
+	"strconv"
 
 	//	"bytes"
 	"sync"
@@ -158,10 +160,10 @@ func (rf *Raft) GetState() (int, bool) {
 
 	var term int
 	var isLeader bool
-	rf.mu.Lock()
+	rf.lockMutex()
 	term = rf.currentTerm
 	isLeader = rf.state == Leader
-	rf.mu.Unlock()
+	rf.unlockMutex()
 
 	return term, isLeader
 }
@@ -261,8 +263,8 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.lockMutex()
+	defer rf.unlockMutex()
 	if rf.killed() {
 		return
 	}
@@ -349,8 +351,8 @@ type AppendEntriesReply struct {
 // AppendEntries RPC handler.
 //
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.lockMutex()
+	defer rf.unlockMutex()
 	if rf.killed() {
 		return
 	}
@@ -471,7 +473,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := false
 
 	// Your code here (2B).
-	rf.mu.Lock()
+	rf.lockMutex()
 	if rf.state == Leader && !rf.killed() {
 		rf.dLog("Start agreement on next command: %v\t log: %v at node %v", command, rf.log, rf.me)
 		rf.log = append(rf.log, LogEntry{
@@ -483,11 +485,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = len(rf.log) - 1
 		term = rf.currentTerm
 		isLeader = true
-		rf.mu.Unlock()
+		rf.unlockMutex()
 		rf.triggerAECh <- struct{}{}
 		return index, term, isLeader
 	}
-	rf.mu.Unlock()
+	rf.unlockMutex()
 	return index, term, isLeader
 }
 
@@ -508,7 +510,6 @@ func (rf *Raft) Kill() {
 	rf.dLog("node dead")
 	close(rf.newApplyReadyCh)
 	close(rf.applyCh)
-	close(rf.triggerAECh)
 }
 
 func (rf *Raft) killed() bool {
@@ -526,9 +527,9 @@ func (rf *Raft) electionTimeout() time.Duration {
 // heartbeats recently.
 func (rf *Raft) ticker() {
 	timeoutDuration := rf.electionTimeout()
-	rf.mu.Lock()
+	rf.lockMutex()
 	termStarted := rf.currentTerm
-	rf.mu.Unlock()
+	rf.unlockMutex()
 	rf.dLog("election timer started (%v), term=%d", timeoutDuration, termStarted)
 
 	// This loops until either:
@@ -539,16 +540,16 @@ func (rf *Raft) ticker() {
 	for rf.killed() == false {
 		// Your code here to check if a leader election should be started
 		<-electionTicker.C
-		rf.mu.Lock()
+		rf.lockMutex()
 		if rf.state != Candidate && rf.state != Follower {
 			rf.dLog("in election timer state=%s, bailing out", rf.state)
-			rf.mu.Unlock()
+			rf.unlockMutex()
 			return
 		}
 
 		if termStarted != rf.currentTerm {
 			rf.dLog("in election timer term changed from %d to %d, bailing out", termStarted, rf.currentTerm)
-			rf.mu.Unlock()
+			rf.unlockMutex()
 			return
 		}
 
@@ -558,10 +559,10 @@ func (rf *Raft) ticker() {
 		if elapsed >= timeoutDuration {
 			rf.dLog("elapsed: %v, timeoutDuration: %v, electionResetEvent: %v", elapsed, timeoutDuration, rf.electionResetEvent)
 			rf.startElection()
-			rf.mu.Unlock()
+			rf.unlockMutex()
 			return
 		}
-		rf.mu.Unlock()
+		rf.unlockMutex()
 	}
 }
 
@@ -582,9 +583,9 @@ func (rf *Raft) startElection() {
 	// Send RequestVote RPCs to all other servers concurrently.
 	for id := range rf.peers {
 		go func(peerId int) {
-			rf.mu.Lock()
+			rf.lockMutex()
 			savedLastLogIndex, savedLastLogTerm := rf.lastLogIndexAndTerm()
-			rf.mu.Unlock()
+			rf.unlockMutex()
 
 			args := RequestVoteArgs{
 				Term:         savedCurrentTerm,
@@ -597,8 +598,8 @@ func (rf *Raft) startElection() {
 			var reply RequestVoteReply
 			ok := rf.sendRequestVote(peerId, &args, &reply)
 			if ok {
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
+				rf.lockMutex()
+				defer rf.unlockMutex()
 				if rf.state != Candidate {
 					rf.dLog("while waiting for reply, state = %v", rf.state)
 					return
@@ -686,13 +687,12 @@ func (rf *Raft) startLeader() {
 
 			if doSend {
 				rf.dLog("doSend AppendEntries from leader to peers")
-				rf.mu.Lock()
-				rf.dLog("doSend mu locked")
+				rf.lockMutex()
 				if rf.state != Leader {
-					rf.mu.Unlock()
+					rf.unlockMutex()
 					return
 				}
-				rf.mu.Unlock()
+				rf.unlockMutex()
 				rf.dLog("Call leaderSendAEs inside heartbeat: time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
 				rf.leaderSendAEs()
 			}
@@ -703,13 +703,13 @@ func (rf *Raft) startLeader() {
 // leaderSendAEs sends a round of AEs to all peers, collects their
 // replies and adjusts node's state.
 func (rf *Raft) leaderSendAEs() {
-	rf.mu.Lock()
+	rf.lockMutex()
 	savedCurrentTerm := rf.currentTerm
-	rf.mu.Unlock()
+	rf.unlockMutex()
 
 	for peerId := range rf.peers {
 		go func(peerId int) {
-			rf.mu.Lock()
+			rf.lockMutex()
 			ni := rf.nextIndex[peerId]
 			prevLogIndex := ni - 1
 			prevLogTerm := -1
@@ -726,19 +726,22 @@ func (rf *Raft) leaderSendAEs() {
 				Entries:      entries,
 				LeaderCommit: rf.commitIndex,
 			}
-			rf.mu.Unlock()
+			rf.unlockMutex()
 			rf.dLog("sending AppendEntries to %v: ni=%d, args=%+v", peerId, ni, args)
 			var reply AppendEntriesReply
 			ok := rf.sendAppendEntries(peerId, args, &reply)
+			rf.dLog("Called rf.sendAppendEntries")
 			if ok {
-				rf.mu.Lock()
-				defer rf.mu.Unlock()
 				if reply.Term > savedCurrentTerm {
 					rf.dLog("term out of date in heartbeat reply")
+					rf.lockMutex()
 					rf.becomeFollower(reply.Term)
+					rf.unlockMutex()
 					return
 				}
 
+				rf.dLog("state: %v, reply.term: %v", Leader.String(), reply.Term)
+				rf.lockMutex()
 				if rf.state == Leader && savedCurrentTerm == reply.Term {
 					if reply.Success {
 						rf.nextIndex[peerId] = ni + len(entries)
@@ -765,7 +768,19 @@ func (rf *Raft) leaderSendAEs() {
 							// committed. Send new entries on the commit channel to this
 							// leader's clients, and notify followers by sending them AEs.
 							rf.newApplyReadyCh <- struct{}{}
-							rf.triggerAECh <- struct{}{}
+							for {
+								select {
+								case rf.triggerAECh <- struct{}{}:
+									break
+								default:
+									// heartbeat goroutine will be waiting on the lock before reading from triggerAECh
+									// this goroutine will hold the lock and be blocked on writing to triggerAECh which might lead to deadlock
+									// we release the lock for a few milliseconds so that heartbeat and this goroutine can continue
+									rf.unlockMutex()
+									time.Sleep(10 * time.Millisecond)
+									rf.lockMutex()
+								}
+							}
 						}
 					} else {
 						if reply.ConflictTerm >= 0 {
@@ -787,6 +802,7 @@ func (rf *Raft) leaderSendAEs() {
 						rf.dLog("AppendEntries reply from %d !success: nextIndex := %d", peerId, ni-1)
 					}
 				}
+				rf.unlockMutex()
 			} else {
 				rf.dLog("sendAppendEntries failed")
 			}
@@ -794,10 +810,19 @@ func (rf *Raft) leaderSendAEs() {
 	}
 }
 
+func getGID() uint64 {
+	b := make([]byte, 64)
+	b = b[:runtime.Stack(b, false)]
+	b = bytes.TrimPrefix(b, []byte("goroutine "))
+	b = b[:bytes.IndexByte(b, ' ')]
+	n, _ := strconv.ParseUint(string(b), 10, 64)
+	return n
+}
+
 // dLog logs a debugging message if DebugMode is true.
 func (rf *Raft) dLog(format string, args ...interface{}) {
 	if DebugMode {
-		format = fmt.Sprintf("[%d] ", rf.me) + format
+		format = fmt.Sprintf("[%v]\t\t[%d]\t", getGID(), rf.me) + format
 		log.Printf(format, args...)
 	}
 }
@@ -811,7 +836,7 @@ func (rf *Raft) dLog(format string, args ...interface{}) {
 func (rf *Raft) applyChSender() {
 	for range rf.newApplyReadyCh {
 		// Find which entries we have to apply.
-		rf.mu.Lock()
+		rf.lockMutex()
 		// savedTerm := rf.currentTerm
 		savedLastApplied := rf.lastApplied
 		var entries []LogEntry
@@ -819,7 +844,7 @@ func (rf *Raft) applyChSender() {
 			entries = rf.log[rf.lastApplied+1 : rf.commitIndex+1]
 			rf.lastApplied = rf.commitIndex
 		}
-		rf.mu.Unlock()
+		rf.unlockMutex()
 		rf.dLog("applyChSender entries=%v, savedLastApplied=%d", entries, savedLastApplied)
 
 		for i, entry := range entries {
@@ -877,12 +902,23 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go func() {
-		rf.mu.Lock()
+		rf.lockMutex()
 		rf.electionResetEvent = time.Now()
-		rf.mu.Unlock()
+		rf.unlockMutex()
 		rf.ticker()
 	}()
 
 	go rf.applyChSender()
 	return rf
+}
+
+func (rf *Raft) unlockMutex() {
+	rf.mu.Unlock()
+	//rf.dLog("Mutex unlocked")
+}
+
+func (rf *Raft) lockMutex() {
+	//rf.dLog("try to lock mutex")
+	rf.mu.Lock()
+	//rf.dLog("Mutex locked")
 }
