@@ -20,6 +20,8 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
+	"crypto/sha1"
+	"encoding/gob"
 	"errors"
 	"fmt"
 	"log"
@@ -39,9 +41,11 @@ import (
 const DebugMode = false
 
 const (
-	ElectionTimeout  = 300 * time.Millisecond
-	HeartBeatTimeout = 200 * time.Millisecond
-	ElectionTicker   = 10 * time.Millisecond
+	ElectionTimeout  = 400 * time.Millisecond
+	HeartBeatTimeout = 250 * time.Millisecond
+	ElectionTicker   = 20 * time.Millisecond
+	// HeartBeatsPerAppendEntry Send AppendEntry messages to peers from leader on every 5th heartbeat
+	HeartBeatsPerAppendEntry = 5
 )
 
 //
@@ -72,6 +76,11 @@ type LogEntry struct {
 	Term    int
 }
 
+type AppendEntriesData struct {
+	encodedAEData              string
+	heartBeatsSinceFirstAppend int
+}
+
 type NodeState int
 
 const (
@@ -100,7 +109,7 @@ func logFatal(err error) {
 }
 
 //
-// Raft : A Go object implementing a single Raft peer.
+// Raft : Implements a single Raft peer.
 //
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -138,8 +147,9 @@ type Raft struct {
 	electionResetEvent time.Time
 
 	// Volatile raft state on leaders
-	nextIndex  map[int]int
-	matchIndex map[int]int
+	nextIndex             map[int]int
+	matchIndex            map[int]int
+	lastAppendEntriesData map[int]AppendEntriesData
 }
 
 // lastLogIndexAndTerm returns the last log index and the last log entry's term
@@ -523,7 +533,7 @@ func (rf *Raft) electionTimeout() time.Duration {
 	return ElectionTimeout + r
 }
 
-// The ticker go routine starts a new election if this peer hasn't received
+// The ticker goroutine starts a new election if this peer hasn't received
 // heartbeats recently.
 func (rf *Raft) ticker() {
 	timeoutDuration := rf.electionTimeout()
@@ -654,9 +664,9 @@ func (rf *Raft) startLeader() {
 
 	// This goroutine runs in the background and sends AEs to peers:
 	// * Whenever something is sent on triggerAECh
-	// * ... Or every 200 ms, if no events occur on triggerAECh
+	// * ... Or every HeartBeatTimeout ms, if no events occur on triggerAECh
 	go func(heartbeatTimeout time.Duration) {
-		rf.leaderSendAEs()
+		//rf.leaderSendAEs()
 
 		t := time.NewTimer(heartbeatTimeout)
 		defer t.Stop()
@@ -700,17 +710,41 @@ func (rf *Raft) startLeader() {
 	}(HeartBeatTimeout)
 }
 
+func (rf *Raft) incrementLastAppendHeartBeatFor(peerId int) {
+	aeHeartBeats, ok := rf.lastAppendEntriesData[peerId]
+	if ok {
+		aeHeartBeats.heartBeatsSinceFirstAppend += 1
+		rf.lastAppendEntriesData[peerId] = aeHeartBeats
+		rf.dLog("... peerId=%d, heartBeatsSinceFirstAppend=%d", peerId, rf.lastAppendEntriesData[peerId].heartBeatsSinceFirstAppend)
+	} else {
+		rf.dLog("... peerId %d not in lastAppendEntriesData", peerId)
+	}
+}
+
+func (rf *Raft) incrementLastAppendHeartBeat() {
+	rf.dLog("incrementLastAppendHeartBeat")
+	rf.dLog("... lastAppendEntriesData: %v", rf.lastAppendEntriesData)
+	for peerId := range rf.peers {
+		rf.incrementLastAppendHeartBeatFor(peerId)
+	}
+	rf.dLog("... lastAppendEntriesData: %v", rf.lastAppendEntriesData)
+}
+
 // leaderSendAEs sends a round of AEs to all peers, collects their
 // replies and adjusts node's state.
 func (rf *Raft) leaderSendAEs() {
 	rf.lockMutex()
 	savedCurrentTerm := rf.currentTerm
+	rf.incrementLastAppendHeartBeat()
 	rf.unlockMutex()
 
 	for peerId := range rf.peers {
+		rf.dLog("create goroutine in leaderSendAEs")
 		go func(peerId int) {
+			rf.dLog("goroutine from leaderSendAEs for peerId:%d\n", peerId)
 			rf.lockMutex()
 			ni := rf.nextIndex[peerId]
+			rf.dLog("reading nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
 			prevLogIndex := ni - 1
 			prevLogTerm := -1
 			if prevLogIndex >= 0 {
@@ -726,88 +760,140 @@ func (rf *Raft) leaderSendAEs() {
 				Entries:      entries,
 				LeaderCommit: rf.commitIndex,
 			}
+
+			rf.dLog("AppendEntriesArgs: %v", args)
+
+			args.Entries = rf.decideIfEntriesShouldBeSent(peerId, args)
+			if len(args.Entries) > 0 {
+				rf.dLog("sending AppendEntries to %v: ni=%d, args=%v, heartBeatsSinceFirstAppend=%d", peerId, ni, args, rf.lastAppendEntriesData[peerId].heartBeatsSinceFirstAppend)
+				rf.incrementLastAppendHeartBeatFor(peerId)
+			}
 			rf.unlockMutex()
-			rf.dLog("sending AppendEntries to %v: ni=%d, args=%+v", peerId, ni, args)
 			var reply AppendEntriesReply
 			ok := rf.sendAppendEntries(peerId, args, &reply)
+
 			rf.dLog("Called rf.sendAppendEntries")
 			if ok {
-				if reply.Term > savedCurrentTerm {
-					rf.dLog("term out of date in heartbeat reply")
-					rf.lockMutex()
-					rf.becomeFollower(reply.Term)
-					rf.unlockMutex()
-					return
-				}
-
-				rf.dLog("state: %v, reply.term: %v", Leader.String(), reply.Term)
-				rf.lockMutex()
-				if rf.state == Leader && savedCurrentTerm == reply.Term {
-					if reply.Success {
-						rf.nextIndex[peerId] = ni + len(entries)
-						rf.matchIndex[peerId] = rf.nextIndex[peerId] - 1
-
-						savedCommitIndex := rf.commitIndex
-						for i := rf.commitIndex + 1; i < len(rf.log); i++ {
-							if rf.log[i].Term == rf.currentTerm {
-								matchCount := 1
-								for peerId := range rf.peers {
-									if rf.matchIndex[peerId] >= i {
-										matchCount++
-									}
-								}
-								if matchCount*2 > len(rf.peers)+1 {
-									rf.commitIndex = i
-								}
-							}
-						}
-						rf.dLog("AppendEntries reply from %d success: nextIndex := %v, matchIndex := %v; commitIndex := %d", peerId, rf.nextIndex, rf.matchIndex, rf.commitIndex)
-						if rf.commitIndex != savedCommitIndex {
-							rf.dLog("leader sets commitIndex := %d", rf.commitIndex)
-							// Commit index changed: the leader considers new entries to be
-							// committed. Send new entries on the commit channel to this
-							// leader's clients, and notify followers by sending them AEs.
-							rf.newApplyReadyCh <- struct{}{}
-							for {
-								select {
-								case rf.triggerAECh <- struct{}{}:
-									break
-								default:
-									// heartbeat goroutine will be waiting on the lock before reading from triggerAECh
-									// this goroutine will hold the lock and be blocked on writing to triggerAECh which might lead to deadlock
-									// we release the lock for a few milliseconds so that heartbeat and this goroutine can continue
-									rf.unlockMutex()
-									time.Sleep(10 * time.Millisecond)
-									rf.lockMutex()
-								}
-							}
-						}
-					} else {
-						if reply.ConflictTerm >= 0 {
-							lastIndexOfTerm := -1
-							for i := len(rf.log) - 1; i >= 0; i-- {
-								if rf.log[i].Term == reply.ConflictTerm {
-									lastIndexOfTerm = i
-									break
-								}
-							}
-							if lastIndexOfTerm >= 0 {
-								rf.nextIndex[peerId] = lastIndexOfTerm + 1
-							} else {
-								rf.nextIndex[peerId] = reply.ConflictIndex
-							}
-						} else {
-							rf.nextIndex[peerId] = reply.ConflictIndex
-						}
-						rf.dLog("AppendEntries reply from %d !success: nextIndex := %d", peerId, ni-1)
-					}
-				}
-				rf.unlockMutex()
+				rf.onAppendEntryReply(peerId, reply, savedCurrentTerm, args, entries, ni)
 			} else {
 				rf.dLog("sendAppendEntries failed")
 			}
 		}(peerId)
 	}
+}
+
+func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCurrentTerm int, args AppendEntriesArgs, entries []LogEntry, ni int) {
+	if reply.Term > savedCurrentTerm {
+		rf.dLog("term out of date in heartbeat reply")
+		rf.lockMutex()
+		rf.becomeFollower(reply.Term)
+		rf.unlockMutex()
+		return
+	}
+
+	rf.dLog("state: %v, reply.term: %v", Leader.String(), reply.Term)
+	rf.lockMutex()
+	if rf.state == Leader && savedCurrentTerm == reply.Term {
+		if reply.Success {
+			aeHeartBeats, ok := rf.lastAppendEntriesData[peerId]
+			if ok && aeHeartBeats.encodedAEData == encodeAEData(args) {
+				delete(rf.lastAppendEntriesData, peerId)
+				rf.dLog("lastAppendEntriesData: %v", rf.lastAppendEntriesData)
+				rf.dLog("deleted lastAppendEntriesData for node %d", peerId)
+			}
+			if len(entries) > 0 {
+				rf.nextIndex[peerId] = ni + len(entries)
+				rf.dLog("On AE reply success nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
+				rf.matchIndex[peerId] = rf.nextIndex[peerId] - 1
+			}
+
+			savedCommitIndex := rf.commitIndex
+			for i := rf.commitIndex + 1; i < len(rf.log); i++ {
+				if rf.log[i].Term == rf.currentTerm {
+					matchCount := 1
+					for peerId := range rf.peers {
+						if rf.matchIndex[peerId] >= i {
+							matchCount++
+						}
+					}
+					if matchCount*2 > len(rf.peers)+1 {
+						rf.commitIndex = i
+					}
+				}
+			}
+			rf.dLog("AppendEntries reply from %d success: nextIndex := %v, matchIndex := %v; commitIndex := %d", peerId, rf.nextIndex, rf.matchIndex, rf.commitIndex)
+			if rf.commitIndex != savedCommitIndex {
+				rf.dLog("leader sets commitIndex := %d", rf.commitIndex)
+				// Commit index changed: the leader considers new entries to be
+				// committed. Send new entries on the commit channel to this
+				// leader's clients, and notify followers by sending them AEs.
+				rf.newApplyReadyCh <- struct{}{}
+				for {
+					select {
+					case rf.triggerAECh <- struct{}{}:
+						break
+					default:
+						// heartbeat goroutine will be waiting on the lock before reading from triggerAECh
+						// this goroutine will hold the lock and be blocked on writing to triggerAECh which might lead to deadlock
+						// we release the lock for a few milliseconds so that heartbeat and this goroutine can continue
+						rf.unlockMutex()
+						time.Sleep(10 * time.Millisecond)
+						rf.lockMutex()
+					}
+				}
+			}
+		} else {
+			if reply.ConflictTerm >= 0 {
+				lastIndexOfTerm := -1
+				for i := len(rf.log) - 1; i >= 0; i-- {
+					if rf.log[i].Term == reply.ConflictTerm {
+						lastIndexOfTerm = i
+						break
+					}
+				}
+				if lastIndexOfTerm >= 0 {
+					rf.nextIndex[peerId] = lastIndexOfTerm + 1
+				} else {
+					rf.nextIndex[peerId] = reply.ConflictIndex
+				}
+			} else {
+				rf.nextIndex[peerId] = reply.ConflictIndex
+			}
+			rf.dLog("AppendEntries reply from %d !success: nextIndex := %d", peerId, ni-1)
+		}
+	}
+	rf.unlockMutex()
+}
+
+// Do not resend entries on every heartbeat. Send entries once for every HeartBeatsPerAppendEntry heartbeats
+func (rf *Raft) decideIfEntriesShouldBeSent(peerId int, args AppendEntriesArgs) []LogEntry {
+	if args.Entries == nil || len(args.Entries) == 0 {
+		return args.Entries
+	}
+	aeHeartBeats, ok := rf.lastAppendEntriesData[peerId]
+	if ok {
+		if aeHeartBeats.encodedAEData == encodeAEData(args) {
+			rf.dLog("encodedData matches, heartBeatsSinceFirstAppend: %d", aeHeartBeats.heartBeatsSinceFirstAppend)
+			rf.dLog("encodedData matches, heartBeatsSinceFirstAppend mod %d: %d", HeartBeatsPerAppendEntry, aeHeartBeats.heartBeatsSinceFirstAppend%HeartBeatsPerAppendEntry)
+			if (aeHeartBeats.heartBeatsSinceFirstAppend)%HeartBeatsPerAppendEntry > 0 {
+				args.Entries = []LogEntry{}
+				rf.dLog("encodedData matches, set entries to empty")
+			}
+		} else {
+			rf.dLog("encodedData does not match; encodedData: %v\tsaved data: %v", encodeAEData(args), aeHeartBeats.encodedAEData)
+		}
+	} else {
+		rf.dLog("peerid not present in lastAppendEntriesData map, adding peerid")
+		if rf.lastAppendEntriesData == nil {
+			rf.lastAppendEntriesData = make(map[int]AppendEntriesData)
+		}
+		rf.lastAppendEntriesData[peerId] = AppendEntriesData{
+			encodedAEData:              encodeAEData(args),
+			heartBeatsSinceFirstAppend: 0,
+		}
+	}
+	rf.dLog("lastAppendEntriesData: %v", rf.lastAppendEntriesData)
+	return args.Entries
 }
 
 func getGID() uint64 {
@@ -822,7 +908,7 @@ func getGID() uint64 {
 // dLog logs a debugging message if DebugMode is true.
 func (rf *Raft) dLog(format string, args ...interface{}) {
 	if DebugMode {
-		format = fmt.Sprintf("[%v]\t\t[%d]\t", getGID(), rf.me) + format
+		format = fmt.Sprintf("[Goroutine: %v]\t\t[%d]\t", getGID(), rf.me) + format
 		log.Printf(format, args...)
 	}
 }
@@ -921,4 +1007,23 @@ func (rf *Raft) lockMutex() {
 	//rf.dLog("try to lock mutex")
 	rf.mu.Lock()
 	//rf.dLog("Mutex locked")
+}
+
+func encodeAEData(args AppendEntriesArgs) string {
+	aeArgs := AppendEntriesArgs{
+		Term:         args.Term,
+		LeaderId:     args.LeaderId,
+		PrevLogIndex: args.PrevLogIndex,
+		PrevLogTerm:  args.PrevLogTerm,
+		Entries:      args.Entries,
+	}
+	h := sha1.New()
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	err := enc.Encode(aeArgs)
+	if err != nil {
+		log.Fatal("encode error:", err)
+	}
+	h.Write(buf.Bytes())
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
