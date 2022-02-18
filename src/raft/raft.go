@@ -20,8 +20,6 @@ package raft
 import (
 	"6.824/labgob"
 	"bytes"
-	"crypto/sha1"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"log"
@@ -41,11 +39,9 @@ import (
 const DebugMode = false
 
 const (
-	ElectionTimeout  = 400 * time.Millisecond
-	HeartBeatTimeout = 250 * time.Millisecond
+	ElectionTimeout  = 300 * time.Millisecond
+	HeartBeatTimeout = 150 * time.Millisecond
 	ElectionTicker   = 20 * time.Millisecond
-	// HeartBeatsPerAppendEntry Send AppendEntry messages to peers from leader on every 5th heartbeat
-	HeartBeatsPerAppendEntry = 5
 )
 
 //
@@ -74,11 +70,6 @@ type ApplyMsg struct {
 type LogEntry struct {
 	Command interface{}
 	Term    int
-}
-
-type AppendEntriesData struct {
-	encodedAEData              string
-	heartBeatsSinceFirstAppend int
 }
 
 type NodeState int
@@ -147,9 +138,8 @@ type Raft struct {
 	electionResetEvent time.Time
 
 	// Volatile raft state on leaders
-	nextIndex             map[int]int
-	matchIndex            map[int]int
-	lastAppendEntriesData map[int]AppendEntriesData
+	nextIndex  map[int]int
+	matchIndex map[int]int
 }
 
 // lastLogIndexAndTerm returns the last log index and the last log entry's term
@@ -381,8 +371,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		}
 		rf.electionResetEvent = time.Now()
 		rf.dLog("electionResetEvent in AppendEntries")
-		// check if our log contain an entry at PrevLogIndex whose term matches
-		// PrevLogTerm
+		// check if our log contain an entry at PrevLogIndex whose term matches PrevLogTerm
 		if args.PrevLogIndex == -1 ||
 			(args.PrevLogIndex < len(rf.log) && args.PrevLogTerm == rf.log[args.PrevLogIndex].Term) {
 			reply.Success = true
@@ -710,32 +699,11 @@ func (rf *Raft) startLeader() {
 	}(HeartBeatTimeout)
 }
 
-func (rf *Raft) incrementLastAppendHeartBeatFor(peerId int) {
-	aeHeartBeats, ok := rf.lastAppendEntriesData[peerId]
-	if ok {
-		aeHeartBeats.heartBeatsSinceFirstAppend += 1
-		rf.lastAppendEntriesData[peerId] = aeHeartBeats
-		rf.dLog("... peerId=%d, heartBeatsSinceFirstAppend=%d", peerId, rf.lastAppendEntriesData[peerId].heartBeatsSinceFirstAppend)
-	} else {
-		rf.dLog("... peerId %d not in lastAppendEntriesData", peerId)
-	}
-}
-
-func (rf *Raft) incrementLastAppendHeartBeat() {
-	rf.dLog("incrementLastAppendHeartBeat")
-	rf.dLog("... lastAppendEntriesData: %v", rf.lastAppendEntriesData)
-	for peerId := range rf.peers {
-		rf.incrementLastAppendHeartBeatFor(peerId)
-	}
-	rf.dLog("... lastAppendEntriesData: %v", rf.lastAppendEntriesData)
-}
-
 // leaderSendAEs sends a round of AEs to all peers, collects their
 // replies and adjusts node's state.
 func (rf *Raft) leaderSendAEs() {
 	rf.lockMutex()
 	savedCurrentTerm := rf.currentTerm
-	rf.incrementLastAppendHeartBeat()
 	rf.unlockMutex()
 
 	for peerId := range rf.peers {
@@ -759,21 +727,15 @@ func (rf *Raft) leaderSendAEs() {
 				Entries:      entries,
 				LeaderCommit: rf.commitIndex,
 			}
-
-			rf.dLog("AppendEntriesArgs: %v", args)
-
-			args.Entries = rf.decideIfEntriesShouldBeSent(peerId, args)
-			if len(args.Entries) > 0 {
-				rf.dLog("sending AppendEntries to %v: ni=%d, args=%v, heartBeatsSinceFirstAppend=%d", peerId, ni, args, rf.lastAppendEntriesData[peerId].heartBeatsSinceFirstAppend)
-				rf.incrementLastAppendHeartBeatFor(peerId)
-			}
 			rf.unlockMutex()
+
+			rf.dLog("sending AppendEntries to %v: ni=%d, args=%v", peerId, ni, args)
 			var reply AppendEntriesReply
 			ok := rf.sendAppendEntries(peerId, args, &reply)
 
 			rf.dLog("Called rf.sendAppendEntries")
 			if ok {
-				rf.onAppendEntryReply(peerId, reply, savedCurrentTerm, args, entries, ni)
+				rf.onAppendEntryReply(peerId, reply, savedCurrentTerm, entries, ni)
 			} else {
 				rf.dLog("sendAppendEntries failed")
 			}
@@ -781,7 +743,7 @@ func (rf *Raft) leaderSendAEs() {
 	}
 }
 
-func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCurrentTerm int, args AppendEntriesArgs, entries []LogEntry, ni int) {
+func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCurrentTerm int, entries []LogEntry, ni int) {
 	if reply.Term > savedCurrentTerm {
 		rf.dLog("term out of date in heartbeat reply")
 		rf.lockMutex()
@@ -794,12 +756,6 @@ func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCu
 	rf.lockMutex()
 	if rf.state == Leader && savedCurrentTerm == reply.Term {
 		if reply.Success {
-			aeHeartBeats, ok := rf.lastAppendEntriesData[peerId]
-			if ok && aeHeartBeats.encodedAEData == encodeAEData(args) {
-				delete(rf.lastAppendEntriesData, peerId)
-				rf.dLog("lastAppendEntriesData: %v", rf.lastAppendEntriesData)
-				rf.dLog("deleted lastAppendEntriesData for node %d", peerId)
-			}
 			if len(entries) > 0 {
 				rf.nextIndex[peerId] = ni + len(entries)
 				rf.dLog("On AE reply success nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
@@ -865,37 +821,6 @@ func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCu
 	rf.unlockMutex()
 }
 
-// Do not resend entries on every heartbeat. Send entries once for every HeartBeatsPerAppendEntry heartbeats
-func (rf *Raft) decideIfEntriesShouldBeSent(peerId int, args AppendEntriesArgs) []LogEntry {
-	if args.Entries == nil || len(args.Entries) == 0 {
-		return args.Entries
-	}
-	aeHeartBeats, ok := rf.lastAppendEntriesData[peerId]
-	if ok {
-		if aeHeartBeats.encodedAEData == encodeAEData(args) {
-			rf.dLog("encodedData matches, heartBeatsSinceFirstAppend: %d", aeHeartBeats.heartBeatsSinceFirstAppend)
-			rf.dLog("encodedData matches, heartBeatsSinceFirstAppend mod %d: %d", HeartBeatsPerAppendEntry, aeHeartBeats.heartBeatsSinceFirstAppend%HeartBeatsPerAppendEntry)
-			if (aeHeartBeats.heartBeatsSinceFirstAppend)%HeartBeatsPerAppendEntry > 0 {
-				args.Entries = []LogEntry{}
-				rf.dLog("encodedData matches, set entries to empty")
-			}
-		} else {
-			rf.dLog("encodedData does not match; encodedData: %v\tsaved data: %v", encodeAEData(args), aeHeartBeats.encodedAEData)
-		}
-	} else {
-		rf.dLog("peerid not present in lastAppendEntriesData map, adding peerid")
-		if rf.lastAppendEntriesData == nil {
-			rf.lastAppendEntriesData = make(map[int]AppendEntriesData)
-		}
-		rf.lastAppendEntriesData[peerId] = AppendEntriesData{
-			encodedAEData:              encodeAEData(args),
-			heartBeatsSinceFirstAppend: 0,
-		}
-	}
-	rf.dLog("lastAppendEntriesData: %v", rf.lastAppendEntriesData)
-	return args.Entries
-}
-
 func getGID() uint64 {
 	b := make([]byte, 64)
 	b = b[:runtime.Stack(b, false)]
@@ -923,7 +848,7 @@ func (rf *Raft) applyChSender() {
 	for range rf.newApplyReadyCh {
 		// Find which entries we have to apply.
 		rf.lockMutex()
-		// savedTerm := rf.currentTerm
+		//savedTerm := rf.currentTerm
 		savedLastApplied := rf.lastApplied
 		var entries []LogEntry
 		if rf.commitIndex > rf.lastApplied {
@@ -1007,23 +932,4 @@ func (rf *Raft) lockMutex() {
 	//rf.dLog("try to lock mutex")
 	rf.mu.Lock()
 	//rf.dLog("Mutex locked")
-}
-
-func encodeAEData(args AppendEntriesArgs) string {
-	aeArgs := AppendEntriesArgs{
-		Term:         args.Term,
-		LeaderId:     args.LeaderId,
-		PrevLogIndex: args.PrevLogIndex,
-		PrevLogTerm:  args.PrevLogTerm,
-		Entries:      args.Entries,
-	}
-	h := sha1.New()
-	var buf bytes.Buffer
-	enc := gob.NewEncoder(&buf)
-	err := enc.Encode(aeArgs)
-	if err != nil {
-		log.Fatal("encode error:", err)
-	}
-	h.Write(buf.Bytes())
-	return fmt.Sprintf("%x", h.Sum(nil))
 }
