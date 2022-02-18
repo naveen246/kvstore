@@ -739,9 +739,8 @@ func (rf *Raft) leaderSendAEs() {
 	rf.unlockMutex()
 
 	for peerId := range rf.peers {
-		rf.dLog("create goroutine in leaderSendAEs")
 		go func(peerId int) {
-			rf.dLog("goroutine from leaderSendAEs for peerId:%d\n", peerId)
+			rf.dLog("Created goroutine from leaderSendAEs for peerId:%d\n", peerId)
 			rf.lockMutex()
 			ni := rf.nextIndex[peerId]
 			rf.dLog("reading nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
@@ -828,10 +827,11 @@ func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCu
 				// committed. Send new entries on the commit channel to this
 				// leader's clients, and notify followers by sending them AEs.
 				rf.newApplyReadyCh <- struct{}{}
+			loop:
 				for {
 					select {
 					case rf.triggerAECh <- struct{}{}:
-						break
+						break loop
 					default:
 						// heartbeat goroutine will be waiting on the lock before reading from triggerAECh
 						// this goroutine will hold the lock and be blocked on writing to triggerAECh which might lead to deadlock
