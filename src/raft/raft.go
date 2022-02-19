@@ -276,10 +276,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.becomeFollower(args.Term)
 	}
 
-	if args.Term == rf.currentTerm &&
-		(rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		(args.LastLogTerm > lastLogTerm ||
-			(args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)) {
+	logOk := args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)
+	termOk := args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId)
+
+	if logOk && termOk {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.electionResetEvent = time.Now()
