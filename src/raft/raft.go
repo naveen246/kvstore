@@ -259,7 +259,7 @@ type RequestVoteReply struct {
 
 //
 // RequestVote RPC handler.
-//
+// On receiving RequestVote from a candidate
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 
@@ -746,16 +746,15 @@ func (rf *Raft) leaderSendAEs() {
 }
 
 func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCurrentTerm int, entries []LogEntry, ni int) {
+	rf.lockMutex()
+	defer rf.unlockMutex()
 	if reply.Term > savedCurrentTerm {
 		rf.dLog("term out of date in heartbeat reply")
-		rf.lockMutex()
 		rf.becomeFollower(reply.Term)
-		rf.unlockMutex()
 		return
 	}
 
 	rf.dLog("state: %v, reply.term: %v", Leader.String(), reply.Term)
-	rf.lockMutex()
 	if rf.state == Leader && savedCurrentTerm == reply.Term {
 		if reply.Success {
 			if len(entries) > 0 {
@@ -820,7 +819,6 @@ func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCu
 			rf.dLog("AppendEntries reply from %d !success: nextIndex := %d", peerId, ni-1)
 		}
 	}
-	rf.unlockMutex()
 }
 
 func getGID() uint64 {
