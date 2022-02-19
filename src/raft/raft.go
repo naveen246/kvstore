@@ -770,25 +770,29 @@ func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCu
 		if reply.Success {
 			rf.onAppendEntryReplySuccess(peerId, entries, ni)
 		} else {
-			if reply.ConflictTerm >= 0 {
-				lastIndexOfTerm := -1
-				for i := len(rf.log) - 1; i >= 0; i-- {
-					if rf.log[i].Term == reply.ConflictTerm {
-						lastIndexOfTerm = i
-						break
-					}
-				}
-				if lastIndexOfTerm >= 0 {
-					rf.nextIndex[peerId] = lastIndexOfTerm + 1
-				} else {
-					rf.nextIndex[peerId] = reply.ConflictIndex
-				}
-			} else {
-				rf.nextIndex[peerId] = reply.ConflictIndex
-			}
-			rf.dLog("AppendEntries reply from %d !success: nextIndex := %d", peerId, ni-1)
+			rf.onAppendEntryReplyFailure(peerId, reply, ni)
 		}
 	}
+}
+
+func (rf *Raft) onAppendEntryReplyFailure(peerId int, reply AppendEntriesReply, ni int) {
+	if reply.ConflictTerm >= 0 {
+		lastIndexOfTerm := -1
+		for i := len(rf.log) - 1; i >= 0; i-- {
+			if rf.log[i].Term == reply.ConflictTerm {
+				lastIndexOfTerm = i
+				break
+			}
+		}
+		if lastIndexOfTerm >= 0 {
+			rf.nextIndex[peerId] = lastIndexOfTerm + 1
+		} else {
+			rf.nextIndex[peerId] = reply.ConflictIndex
+		}
+	} else {
+		rf.nextIndex[peerId] = reply.ConflictIndex
+	}
+	rf.dLog("AppendEntries reply from %d not success: nextIndex := %d", peerId, ni-1)
 }
 
 func (rf *Raft) onAppendEntryReplySuccess(peerId int, entries []LogEntry, ni int) {
