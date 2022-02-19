@@ -349,7 +349,7 @@ type AppendEntriesReply struct {
 
 //
 // AppendEntries RPC handler.
-//
+// On receiving AppendEntries request from a leader
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.lockMutex()
 	defer rf.unlockMutex()
@@ -570,31 +570,13 @@ func (rf *Raft) ticker() {
 // startElection starts a new election with this node as a candidate.
 // Expects rf.mu to be locked.
 func (rf *Raft) startElection() {
-	rf.dLog("startElection current state: %v", rf.state)
-	rf.state = Candidate
-	rf.currentTerm += 1
-	savedCurrentTerm := rf.currentTerm
-	rf.electionResetEvent = time.Now()
-	rf.dLog("electionResetEvent in startElection")
-	rf.votedFor = rf.me
-	rf.dLog("becomes Candidate (currentTerm=%d); log=%v", savedCurrentTerm, rf.log)
-
+	candidateCurrentTerm := rf.becomeCandidate()
 	votesReceived := 1
 
 	// Send RequestVote RPCs to all other servers concurrently.
 	for id := range rf.peers {
 		go func(peerId int) {
-			rf.lockMutex()
-			savedLastLogIndex, savedLastLogTerm := rf.lastLogIndexAndTerm()
-			rf.unlockMutex()
-
-			args := RequestVoteArgs{
-				Term:         savedCurrentTerm,
-				CandidateId:  rf.me,
-				LastLogIndex: savedLastLogIndex,
-				LastLogTerm:  savedLastLogTerm,
-			}
-
+			args := rf.getRequestVoteArgs(candidateCurrentTerm)
 			rf.dLog("sending RequestVote to %d: %+v", peerId, args)
 			var reply RequestVoteReply
 			ok := rf.sendRequestVote(peerId, &args, &reply)
@@ -606,18 +588,16 @@ func (rf *Raft) startElection() {
 					return
 				}
 
-				if reply.Term > savedCurrentTerm {
+				if reply.Term > candidateCurrentTerm {
 					rf.dLog("term out of date in RequestVoteReply")
 					rf.becomeFollower(reply.Term)
 					return
-				} else if reply.Term == savedCurrentTerm {
-					if reply.VoteGranted {
-						votesReceived += 1
-						if votesReceived*2 > len(rf.peers)+1 {
-							rf.dLog("wins election with %d votes", votesReceived)
-							rf.startLeader()
-							return
-						}
+				} else if reply.Term == candidateCurrentTerm && reply.VoteGranted {
+					votesReceived += 1
+					if votesReceived*2 > len(rf.peers)+1 {
+						rf.dLog("wins election with %d votes", votesReceived)
+						rf.startLeader()
+						return
 					}
 				}
 			} else {
@@ -628,6 +608,32 @@ func (rf *Raft) startElection() {
 
 	// Run another election ticker, in case this election is not successful.
 	go rf.ticker()
+}
+
+func (rf *Raft) getRequestVoteArgs(savedCurrentTerm int) RequestVoteArgs {
+	rf.lockMutex()
+	defer rf.unlockMutex()
+	savedLastLogIndex, savedLastLogTerm := rf.lastLogIndexAndTerm()
+
+	args := RequestVoteArgs{
+		Term:         savedCurrentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: savedLastLogIndex,
+		LastLogTerm:  savedLastLogTerm,
+	}
+	return args
+}
+
+// Expects rf.mu to be locked.
+func (rf *Raft) becomeCandidate() int {
+	rf.dLog("startElection current state: %v", rf.state)
+	rf.state = Candidate
+	rf.currentTerm += 1
+	rf.electionResetEvent = time.Now()
+	rf.votedFor = rf.me
+	rf.dLog("electionResetEvent in startElection")
+	rf.dLog("becomes Candidate (currentTerm=%d); log=%v", rf.currentTerm, rf.log)
+	return rf.currentTerm
 }
 
 // becomeFollower makes raft node a follower and resets its state.
@@ -733,9 +739,8 @@ func (rf *Raft) leaderSendAEs() {
 
 			rf.dLog("sending AppendEntries to %v: ni=%d, args=%v", peerId, ni, args)
 			var reply AppendEntriesReply
+			rf.dLog("Calling rf.sendAppendEntries")
 			ok := rf.sendAppendEntries(peerId, args, &reply)
-
-			rf.dLog("Called rf.sendAppendEntries")
 			if ok {
 				rf.onAppendEntryReply(peerId, reply, savedCurrentTerm, entries, ni)
 			} else {
@@ -847,10 +852,10 @@ func (rf *Raft) dLog(format string, args ...interface{}) {
 func (rf *Raft) applyChSender() {
 	for range rf.newApplyReadyCh {
 		// Find which entries we have to apply.
+		var entries []LogEntry
 		rf.lockMutex()
 		//savedTerm := rf.currentTerm
 		savedLastApplied := rf.lastApplied
-		var entries []LogEntry
 		if rf.commitIndex > rf.lastApplied {
 			entries = rf.log[rf.lastApplied+1 : rf.commitIndex+1]
 			rf.lastApplied = rf.commitIndex
