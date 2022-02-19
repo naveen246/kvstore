@@ -768,48 +768,7 @@ func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCu
 	rf.dLog("state: %v, reply.term: %v", Leader.String(), reply.Term)
 	if rf.state == Leader && savedCurrentTerm == reply.Term {
 		if reply.Success {
-			if len(entries) > 0 {
-				rf.nextIndex[peerId] = ni + len(entries)
-				rf.dLog("On AE reply success nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
-				rf.matchIndex[peerId] = rf.nextIndex[peerId] - 1
-			}
-
-			savedCommitIndex := rf.commitIndex
-			for i := rf.commitIndex + 1; i < len(rf.log); i++ {
-				if rf.log[i].Term == rf.currentTerm {
-					matchCount := 1
-					for peerId := range rf.peers {
-						if rf.matchIndex[peerId] >= i {
-							matchCount++
-						}
-					}
-					if matchCount*2 > len(rf.peers)+1 {
-						rf.commitIndex = i
-					}
-				}
-			}
-			rf.dLog("AppendEntries reply from %d success: nextIndex := %v, matchIndex := %v; commitIndex := %d", peerId, rf.nextIndex, rf.matchIndex, rf.commitIndex)
-			if rf.commitIndex != savedCommitIndex {
-				rf.dLog("leader sets commitIndex := %d", rf.commitIndex)
-				// Commit index changed: the leader considers new entries to be
-				// committed. Send new entries on the commit channel to this
-				// leader's clients, and notify followers by sending them AEs.
-				rf.newApplyReadyCh <- struct{}{}
-			loop:
-				for {
-					select {
-					case rf.triggerAECh <- struct{}{}:
-						break loop
-					default:
-						// heartbeat goroutine will be waiting on the lock before reading from triggerAECh
-						// this goroutine will hold the lock and be blocked on writing to triggerAECh which might lead to deadlock
-						// we release the lock for a few milliseconds so that heartbeat and this goroutine can continue
-						rf.unlockMutex()
-						time.Sleep(10 * time.Millisecond)
-						rf.lockMutex()
-					}
-				}
-			}
+			rf.onAppendEntryReplySuccess(peerId, entries, ni)
 		} else {
 			if reply.ConflictTerm >= 0 {
 				lastIndexOfTerm := -1
@@ -828,6 +787,51 @@ func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCu
 				rf.nextIndex[peerId] = reply.ConflictIndex
 			}
 			rf.dLog("AppendEntries reply from %d !success: nextIndex := %d", peerId, ni-1)
+		}
+	}
+}
+
+func (rf *Raft) onAppendEntryReplySuccess(peerId int, entries []LogEntry, ni int) {
+	if len(entries) > 0 {
+		rf.nextIndex[peerId] = ni + len(entries)
+		rf.dLog("On AE reply success nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
+		rf.matchIndex[peerId] = rf.nextIndex[peerId] - 1
+	}
+
+	savedCommitIndex := rf.commitIndex
+	for i := rf.commitIndex + 1; i < len(rf.log); i++ {
+		if rf.log[i].Term == rf.currentTerm {
+			matchCount := 1
+			for peerId := range rf.peers {
+				if rf.matchIndex[peerId] >= i {
+					matchCount++
+				}
+			}
+			if matchCount*2 > len(rf.peers)+1 {
+				rf.commitIndex = i
+			}
+		}
+	}
+	rf.dLog("AppendEntries reply from %d success: nextIndex := %v, matchIndex := %v; commitIndex := %d", peerId, rf.nextIndex, rf.matchIndex, rf.commitIndex)
+	if rf.commitIndex != savedCommitIndex {
+		rf.dLog("leader sets commitIndex := %d", rf.commitIndex)
+		// Commit index changed: the leader considers new entries to be
+		// committed. Send new entries on the commit channel to this
+		// leader's clients, and notify followers by sending them AEs.
+		rf.newApplyReadyCh <- struct{}{}
+	loop:
+		for {
+			select {
+			case rf.triggerAECh <- struct{}{}:
+				break loop
+			default:
+				// heartbeat goroutine will be waiting on the lock before reading from triggerAECh
+				// this goroutine will hold the lock and be blocked on writing to triggerAECh which might lead to deadlock
+				// we release the lock for a few milliseconds so that heartbeat and this goroutine can continue
+				rf.unlockMutex()
+				time.Sleep(10 * time.Millisecond)
+				rf.lockMutex()
+			}
 		}
 	}
 }
