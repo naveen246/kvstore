@@ -719,22 +719,9 @@ func (rf *Raft) leaderSendAEs() {
 			rf.dLog("Created goroutine from leaderSendAEs for peerId:%d\n", peerId)
 			rf.lockMutex()
 			ni := rf.nextIndex[peerId]
-			rf.dLog("reading nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
-			prevLogIndex := ni - 1
-			prevLogTerm := -1
-			if prevLogIndex >= 0 {
-				prevLogTerm = rf.log[prevLogIndex].Term
-			}
 			entries := rf.log[ni:]
-
-			args := AppendEntriesArgs{
-				Term:         savedCurrentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: prevLogIndex,
-				PrevLogTerm:  prevLogTerm,
-				Entries:      entries,
-				LeaderCommit: rf.commitIndex,
-			}
+			rf.dLog("reading nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
+			args := rf.getAppendEntriesArgs(ni, savedCurrentTerm, entries)
 			rf.unlockMutex()
 
 			rf.dLog("sending AppendEntries to %v: ni=%d, args=%v", peerId, ni, args)
@@ -748,6 +735,25 @@ func (rf *Raft) leaderSendAEs() {
 			}
 		}(peerId)
 	}
+}
+
+// Expects rf.mu to be locked.
+func (rf *Raft) getAppendEntriesArgs(ni int, savedCurrentTerm int, entries []LogEntry) AppendEntriesArgs {
+	prevLogIndex := ni - 1
+	prevLogTerm := -1
+	if prevLogIndex >= 0 {
+		prevLogTerm = rf.log[prevLogIndex].Term
+	}
+
+	args := AppendEntriesArgs{
+		Term:         savedCurrentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      entries,
+		LeaderCommit: rf.commitIndex,
+	}
+	return args
 }
 
 func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCurrentTerm int, entries []LogEntry, ni int) {
