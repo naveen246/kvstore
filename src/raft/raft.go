@@ -341,8 +341,6 @@ type AppendEntriesReply struct {
 	Term    int
 	Success bool
 
-	// Faster conflict resolution optimization (described near the end of section
-	// 5.3 in the paper.)
 	ConflictIndex int
 	ConflictTerm  int
 }
@@ -374,69 +372,76 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		// check if our log contain an entry at PrevLogIndex whose term matches PrevLogTerm
 		if args.PrevLogIndex == -1 ||
 			(args.PrevLogIndex < len(rf.log) && args.PrevLogTerm == rf.log[args.PrevLogIndex].Term) {
-			reply.Success = true
-
-			// Find an insertion point - where there's a term mismatch between
-			// the existing log starting at PrevLogIndex+1 and the new entries sent
-			// in the RPC.
-			logInsertIndex := args.PrevLogIndex + 1
-			newEntriesIndex := 0
-
-			for {
-				if logInsertIndex >= len(rf.log) || newEntriesIndex >= len(args.Entries) {
-					break
-				}
-				if rf.log[logInsertIndex].Term != args.Entries[newEntriesIndex].Term {
-					break
-				}
-				logInsertIndex++
-				newEntriesIndex++
-			}
-			// At the end of this loop:
-			// - logInsertIndex points at the end of the log, or an index where the
-			//   term mismatches with an entry from the leader
-			// - newEntriesIndex points at the end of Entries, or an index where the
-			//   term mismatches with the corresponding log entry
-			if newEntriesIndex < len(args.Entries) {
-				rf.dLog("... inserting entries %v from index %d", args.Entries[newEntriesIndex:], logInsertIndex)
-				rf.log = append(rf.log[:logInsertIndex], args.Entries[newEntriesIndex:]...)
-				rf.dLog("... log is now: %v", rf.log)
-			}
-
-			// Set commitIndex
-			if args.LeaderCommit > rf.commitIndex {
-				rf.commitIndex = intMin(args.LeaderCommit, len(rf.log)-1)
-				rf.dLog("... setting commitIndex=%d", rf.commitIndex)
-				rf.newApplyReadyCh <- struct{}{}
-			}
+			rf.updateLog(args, reply)
 		} else {
-			// No match for PrevLogIndex/PrevLogTerm. Populate
-			// ConflictIndex/ConflictTerm to help the leader bring us up to date
-			// quickly.
-			if args.PrevLogIndex >= len(rf.log) {
-				reply.ConflictIndex = len(rf.log)
-				reply.ConflictTerm = -1
-			} else {
-				// PrevLogIndex points within our log, but PrevLogTerm doesn't match
-				// rf.log[PrevLogIndex].
-				reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
-
-				var i int
-				for i = args.PrevLogIndex - 1; i >= 0; i-- {
-					if rf.log[i].Term != reply.ConflictTerm {
-						break
-					}
-				}
-				reply.ConflictIndex = i + 1
-			}
+			rf.updateConflictIndex(args, reply)
 		}
-
 	}
 
 	reply.Term = rf.currentTerm
 	rf.persist()
 	rf.dLog("AppendEntries reply: %+v", *reply)
 	rf.dLog("time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
+}
+
+func (rf *Raft) updateLog(args AppendEntriesArgs, reply *AppendEntriesReply) {
+	reply.Success = true
+
+	// Find an insertion point - where there's a term mismatch between
+	// the existing log starting at PrevLogIndex+1 and the new entries sent
+	// in the RPC.
+	logInsertIndex := args.PrevLogIndex + 1
+	newEntriesIndex := 0
+
+	for {
+		if logInsertIndex >= len(rf.log) || newEntriesIndex >= len(args.Entries) {
+			break
+		}
+		if rf.log[logInsertIndex].Term != args.Entries[newEntriesIndex].Term {
+			break
+		}
+		logInsertIndex++
+		newEntriesIndex++
+	}
+	// At the end of this loop:
+	// - logInsertIndex points at the end of the log, or an index where the
+	//   term mismatches with an entry from the leader
+	// - newEntriesIndex points at the end of Entries, or an index where the
+	//   term mismatches with the corresponding log entry
+	if newEntriesIndex < len(args.Entries) {
+		rf.dLog("... inserting entries %v from index %d", args.Entries[newEntriesIndex:], logInsertIndex)
+		rf.log = append(rf.log[:logInsertIndex], args.Entries[newEntriesIndex:]...)
+		rf.dLog("... log is now: %v", rf.log)
+	}
+
+	// Set commitIndex
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = intMin(args.LeaderCommit, len(rf.log)-1)
+		rf.dLog("... setting commitIndex=%d", rf.commitIndex)
+		rf.newApplyReadyCh <- struct{}{}
+	}
+}
+
+func (rf *Raft) updateConflictIndex(args AppendEntriesArgs, reply *AppendEntriesReply) {
+	// No match for PrevLogIndex/PrevLogTerm. Populate
+	// ConflictIndex/ConflictTerm to help the leader bring us up to date
+	// quickly.
+	if args.PrevLogIndex >= len(rf.log) {
+		reply.ConflictIndex = len(rf.log)
+		reply.ConflictTerm = -1
+	} else {
+		// PrevLogIndex points within our log, but PrevLogTerm doesn't match
+		// rf.log[PrevLogIndex].
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+
+		var i int
+		for i = args.PrevLogIndex - 1; i >= 0; i-- {
+			if rf.log[i].Term != reply.ConflictTerm {
+				break
+			}
+		}
+		reply.ConflictIndex = i + 1
+	}
 }
 
 func intMin(a, b int) int {
@@ -648,9 +653,8 @@ func (rf *Raft) becomeFollower(term int) {
 	go rf.ticker()
 }
 
-// startLeader switches node into a leader state and begins process of heartbeats.
 // Expects rf.mu to be locked.
-func (rf *Raft) startLeader() {
+func (rf *Raft) becomeLeader() {
 	rf.state = Leader
 
 	for peerId := range rf.peers {
@@ -658,6 +662,12 @@ func (rf *Raft) startLeader() {
 		rf.matchIndex[peerId] = -1
 	}
 	rf.dLog("becomes Leader; term=%d, nextIndex=%v, matchIndex=%v; log=%v", rf.currentTerm, rf.nextIndex, rf.matchIndex, rf.log)
+}
+
+// startLeader switches node into a leader state and begins process of heartbeats.
+// Expects rf.mu to be locked.
+func (rf *Raft) startLeader() {
+	rf.becomeLeader()
 
 	// This goroutine runs in the background and sends AEs to peers:
 	// * Whenever something is sent on triggerAECh
