@@ -840,6 +840,7 @@ func (rf *Raft) onAppendEntryReplySuccess(peerId int, entries []LogEntry, ni int
 	}
 }
 
+// getGID returns the goroutine ID, useful for debugging
 func getGID() uint64 {
 	b := make([]byte, 64)
 	b = b[:runtime.Stack(b, false)]
