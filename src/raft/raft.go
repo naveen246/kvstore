@@ -259,7 +259,7 @@ type RequestVoteReply struct {
 
 //
 // RequestVote RPC handler.
-//
+// On receiving RequestVote from a candidate
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 
@@ -276,10 +276,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.becomeFollower(args.Term)
 	}
 
-	if args.Term == rf.currentTerm &&
-		(rf.votedFor == -1 || rf.votedFor == args.CandidateId) &&
-		(args.LastLogTerm > lastLogTerm ||
-			(args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)) {
+	logOk := args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)
+	termOk := args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId)
+
+	if logOk && termOk {
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		rf.electionResetEvent = time.Now()
@@ -341,15 +341,13 @@ type AppendEntriesReply struct {
 	Term    int
 	Success bool
 
-	// Faster conflict resolution optimization (described near the end of section
-	// 5.3 in the paper.)
 	ConflictIndex int
 	ConflictTerm  int
 }
 
 //
 // AppendEntries RPC handler.
-//
+// On receiving AppendEntries request from a leader
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.lockMutex()
 	defer rf.unlockMutex()
@@ -374,69 +372,76 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		// check if our log contain an entry at PrevLogIndex whose term matches PrevLogTerm
 		if args.PrevLogIndex == -1 ||
 			(args.PrevLogIndex < len(rf.log) && args.PrevLogTerm == rf.log[args.PrevLogIndex].Term) {
-			reply.Success = true
-
-			// Find an insertion point - where there's a term mismatch between
-			// the existing log starting at PrevLogIndex+1 and the new entries sent
-			// in the RPC.
-			logInsertIndex := args.PrevLogIndex + 1
-			newEntriesIndex := 0
-
-			for {
-				if logInsertIndex >= len(rf.log) || newEntriesIndex >= len(args.Entries) {
-					break
-				}
-				if rf.log[logInsertIndex].Term != args.Entries[newEntriesIndex].Term {
-					break
-				}
-				logInsertIndex++
-				newEntriesIndex++
-			}
-			// At the end of this loop:
-			// - logInsertIndex points at the end of the log, or an index where the
-			//   term mismatches with an entry from the leader
-			// - newEntriesIndex points at the end of Entries, or an index where the
-			//   term mismatches with the corresponding log entry
-			if newEntriesIndex < len(args.Entries) {
-				rf.dLog("... inserting entries %v from index %d", args.Entries[newEntriesIndex:], logInsertIndex)
-				rf.log = append(rf.log[:logInsertIndex], args.Entries[newEntriesIndex:]...)
-				rf.dLog("... log is now: %v", rf.log)
-			}
-
-			// Set commitIndex
-			if args.LeaderCommit > rf.commitIndex {
-				rf.commitIndex = intMin(args.LeaderCommit, len(rf.log)-1)
-				rf.dLog("... setting commitIndex=%d", rf.commitIndex)
-				rf.newApplyReadyCh <- struct{}{}
-			}
+			rf.updateLog(args, reply)
 		} else {
-			// No match for PrevLogIndex/PrevLogTerm. Populate
-			// ConflictIndex/ConflictTerm to help the leader bring us up to date
-			// quickly.
-			if args.PrevLogIndex >= len(rf.log) {
-				reply.ConflictIndex = len(rf.log)
-				reply.ConflictTerm = -1
-			} else {
-				// PrevLogIndex points within our log, but PrevLogTerm doesn't match
-				// rf.log[PrevLogIndex].
-				reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
-
-				var i int
-				for i = args.PrevLogIndex - 1; i >= 0; i-- {
-					if rf.log[i].Term != reply.ConflictTerm {
-						break
-					}
-				}
-				reply.ConflictIndex = i + 1
-			}
+			rf.updateConflictIndex(args, reply)
 		}
-
 	}
 
 	reply.Term = rf.currentTerm
 	rf.persist()
 	rf.dLog("AppendEntries reply: %+v", *reply)
 	rf.dLog("time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
+}
+
+func (rf *Raft) updateLog(args AppendEntriesArgs, reply *AppendEntriesReply) {
+	reply.Success = true
+
+	// Find an insertion point - where there's a term mismatch between
+	// the existing log starting at PrevLogIndex+1 and the new entries sent
+	// in the RPC.
+	logInsertIndex := args.PrevLogIndex + 1
+	newEntriesIndex := 0
+
+	for {
+		if logInsertIndex >= len(rf.log) || newEntriesIndex >= len(args.Entries) {
+			break
+		}
+		if rf.log[logInsertIndex].Term != args.Entries[newEntriesIndex].Term {
+			break
+		}
+		logInsertIndex++
+		newEntriesIndex++
+	}
+	// At the end of this loop:
+	// - logInsertIndex points at the end of the log, or an index where the
+	//   term mismatches with an entry from the leader
+	// - newEntriesIndex points at the end of Entries, or an index where the
+	//   term mismatches with the corresponding log entry
+	if newEntriesIndex < len(args.Entries) {
+		rf.dLog("... inserting entries %v from index %d", args.Entries[newEntriesIndex:], logInsertIndex)
+		rf.log = append(rf.log[:logInsertIndex], args.Entries[newEntriesIndex:]...)
+		rf.dLog("... log is now: %v", rf.log)
+	}
+
+	// Set commitIndex
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = intMin(args.LeaderCommit, len(rf.log)-1)
+		rf.dLog("... setting commitIndex=%d", rf.commitIndex)
+		rf.newApplyReadyCh <- struct{}{}
+	}
+}
+
+func (rf *Raft) updateConflictIndex(args AppendEntriesArgs, reply *AppendEntriesReply) {
+	// No match for PrevLogIndex/PrevLogTerm. Populate
+	// ConflictIndex/ConflictTerm to help the leader bring us up to date
+	// quickly.
+	if args.PrevLogIndex >= len(rf.log) {
+		reply.ConflictIndex = len(rf.log)
+		reply.ConflictTerm = -1
+	} else {
+		// PrevLogIndex points within our log, but PrevLogTerm doesn't match
+		// rf.log[PrevLogIndex].
+		reply.ConflictTerm = rf.log[args.PrevLogIndex].Term
+
+		var i int
+		for i = args.PrevLogIndex - 1; i >= 0; i-- {
+			if rf.log[i].Term != reply.ConflictTerm {
+				break
+			}
+		}
+		reply.ConflictIndex = i + 1
+	}
 }
 
 func intMin(a, b int) int {
@@ -570,31 +575,13 @@ func (rf *Raft) ticker() {
 // startElection starts a new election with this node as a candidate.
 // Expects rf.mu to be locked.
 func (rf *Raft) startElection() {
-	rf.dLog("startElection current state: %v", rf.state)
-	rf.state = Candidate
-	rf.currentTerm += 1
-	savedCurrentTerm := rf.currentTerm
-	rf.electionResetEvent = time.Now()
-	rf.dLog("electionResetEvent in startElection")
-	rf.votedFor = rf.me
-	rf.dLog("becomes Candidate (currentTerm=%d); log=%v", savedCurrentTerm, rf.log)
-
+	candidateCurrentTerm := rf.becomeCandidate()
 	votesReceived := 1
 
 	// Send RequestVote RPCs to all other servers concurrently.
 	for id := range rf.peers {
 		go func(peerId int) {
-			rf.lockMutex()
-			savedLastLogIndex, savedLastLogTerm := rf.lastLogIndexAndTerm()
-			rf.unlockMutex()
-
-			args := RequestVoteArgs{
-				Term:         savedCurrentTerm,
-				CandidateId:  rf.me,
-				LastLogIndex: savedLastLogIndex,
-				LastLogTerm:  savedLastLogTerm,
-			}
-
+			args := rf.getRequestVoteArgs(candidateCurrentTerm)
 			rf.dLog("sending RequestVote to %d: %+v", peerId, args)
 			var reply RequestVoteReply
 			ok := rf.sendRequestVote(peerId, &args, &reply)
@@ -606,18 +593,16 @@ func (rf *Raft) startElection() {
 					return
 				}
 
-				if reply.Term > savedCurrentTerm {
+				if reply.Term > candidateCurrentTerm {
 					rf.dLog("term out of date in RequestVoteReply")
 					rf.becomeFollower(reply.Term)
 					return
-				} else if reply.Term == savedCurrentTerm {
-					if reply.VoteGranted {
-						votesReceived += 1
-						if votesReceived*2 > len(rf.peers)+1 {
-							rf.dLog("wins election with %d votes", votesReceived)
-							rf.startLeader()
-							return
-						}
+				} else if reply.Term == candidateCurrentTerm && reply.VoteGranted {
+					votesReceived += 1
+					if votesReceived*2 > len(rf.peers)+1 {
+						rf.dLog("wins election with %d votes", votesReceived)
+						rf.startLeader()
+						return
 					}
 				}
 			} else {
@@ -628,6 +613,32 @@ func (rf *Raft) startElection() {
 
 	// Run another election ticker, in case this election is not successful.
 	go rf.ticker()
+}
+
+func (rf *Raft) getRequestVoteArgs(savedCurrentTerm int) RequestVoteArgs {
+	rf.lockMutex()
+	defer rf.unlockMutex()
+	savedLastLogIndex, savedLastLogTerm := rf.lastLogIndexAndTerm()
+
+	args := RequestVoteArgs{
+		Term:         savedCurrentTerm,
+		CandidateId:  rf.me,
+		LastLogIndex: savedLastLogIndex,
+		LastLogTerm:  savedLastLogTerm,
+	}
+	return args
+}
+
+// Expects rf.mu to be locked.
+func (rf *Raft) becomeCandidate() int {
+	rf.dLog("startElection current state: %v", rf.state)
+	rf.state = Candidate
+	rf.currentTerm += 1
+	rf.electionResetEvent = time.Now()
+	rf.votedFor = rf.me
+	rf.dLog("electionResetEvent in startElection")
+	rf.dLog("becomes Candidate (currentTerm=%d); log=%v", rf.currentTerm, rf.log)
+	return rf.currentTerm
 }
 
 // becomeFollower makes raft node a follower and resets its state.
@@ -642,9 +653,8 @@ func (rf *Raft) becomeFollower(term int) {
 	go rf.ticker()
 }
 
-// startLeader switches node into a leader state and begins process of heartbeats.
 // Expects rf.mu to be locked.
-func (rf *Raft) startLeader() {
+func (rf *Raft) becomeLeader() {
 	rf.state = Leader
 
 	for peerId := range rf.peers {
@@ -652,6 +662,12 @@ func (rf *Raft) startLeader() {
 		rf.matchIndex[peerId] = -1
 	}
 	rf.dLog("becomes Leader; term=%d, nextIndex=%v, matchIndex=%v; log=%v", rf.currentTerm, rf.nextIndex, rf.matchIndex, rf.log)
+}
+
+// startLeader switches node into a leader state and begins process of heartbeats.
+// Expects rf.mu to be locked.
+func (rf *Raft) startLeader() {
+	rf.becomeLeader()
 
 	// This goroutine runs in the background and sends AEs to peers:
 	// * Whenever something is sent on triggerAECh
@@ -713,29 +729,15 @@ func (rf *Raft) leaderSendAEs() {
 			rf.dLog("Created goroutine from leaderSendAEs for peerId:%d\n", peerId)
 			rf.lockMutex()
 			ni := rf.nextIndex[peerId]
-			rf.dLog("reading nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
-			prevLogIndex := ni - 1
-			prevLogTerm := -1
-			if prevLogIndex >= 0 {
-				prevLogTerm = rf.log[prevLogIndex].Term
-			}
 			entries := rf.log[ni:]
-
-			args := AppendEntriesArgs{
-				Term:         savedCurrentTerm,
-				LeaderId:     rf.me,
-				PrevLogIndex: prevLogIndex,
-				PrevLogTerm:  prevLogTerm,
-				Entries:      entries,
-				LeaderCommit: rf.commitIndex,
-			}
+			rf.dLog("reading nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
+			args := rf.getAppendEntriesArgs(ni, savedCurrentTerm, entries)
 			rf.unlockMutex()
 
 			rf.dLog("sending AppendEntries to %v: ni=%d, args=%v", peerId, ni, args)
 			var reply AppendEntriesReply
+			rf.dLog("Calling rf.sendAppendEntries")
 			ok := rf.sendAppendEntries(peerId, args, &reply)
-
-			rf.dLog("Called rf.sendAppendEntries")
 			if ok {
 				rf.onAppendEntryReply(peerId, reply, savedCurrentTerm, entries, ni)
 			} else {
@@ -745,84 +747,110 @@ func (rf *Raft) leaderSendAEs() {
 	}
 }
 
+// Expects rf.mu to be locked.
+func (rf *Raft) getAppendEntriesArgs(ni int, savedCurrentTerm int, entries []LogEntry) AppendEntriesArgs {
+	prevLogIndex := ni - 1
+	prevLogTerm := -1
+	if prevLogIndex >= 0 {
+		prevLogTerm = rf.log[prevLogIndex].Term
+	}
+
+	args := AppendEntriesArgs{
+		Term:         savedCurrentTerm,
+		LeaderId:     rf.me,
+		PrevLogIndex: prevLogIndex,
+		PrevLogTerm:  prevLogTerm,
+		Entries:      entries,
+		LeaderCommit: rf.commitIndex,
+	}
+	return args
+}
+
 func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCurrentTerm int, entries []LogEntry, ni int) {
+	rf.lockMutex()
+	defer rf.unlockMutex()
 	if reply.Term > savedCurrentTerm {
 		rf.dLog("term out of date in heartbeat reply")
-		rf.lockMutex()
 		rf.becomeFollower(reply.Term)
-		rf.unlockMutex()
 		return
 	}
 
 	rf.dLog("state: %v, reply.term: %v", Leader.String(), reply.Term)
-	rf.lockMutex()
 	if rf.state == Leader && savedCurrentTerm == reply.Term {
 		if reply.Success {
-			if len(entries) > 0 {
-				rf.nextIndex[peerId] = ni + len(entries)
-				rf.dLog("On AE reply success nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
-				rf.matchIndex[peerId] = rf.nextIndex[peerId] - 1
-			}
-
-			savedCommitIndex := rf.commitIndex
-			for i := rf.commitIndex + 1; i < len(rf.log); i++ {
-				if rf.log[i].Term == rf.currentTerm {
-					matchCount := 1
-					for peerId := range rf.peers {
-						if rf.matchIndex[peerId] >= i {
-							matchCount++
-						}
-					}
-					if matchCount*2 > len(rf.peers)+1 {
-						rf.commitIndex = i
-					}
-				}
-			}
-			rf.dLog("AppendEntries reply from %d success: nextIndex := %v, matchIndex := %v; commitIndex := %d", peerId, rf.nextIndex, rf.matchIndex, rf.commitIndex)
-			if rf.commitIndex != savedCommitIndex {
-				rf.dLog("leader sets commitIndex := %d", rf.commitIndex)
-				// Commit index changed: the leader considers new entries to be
-				// committed. Send new entries on the commit channel to this
-				// leader's clients, and notify followers by sending them AEs.
-				rf.newApplyReadyCh <- struct{}{}
-			loop:
-				for {
-					select {
-					case rf.triggerAECh <- struct{}{}:
-						break loop
-					default:
-						// heartbeat goroutine will be waiting on the lock before reading from triggerAECh
-						// this goroutine will hold the lock and be blocked on writing to triggerAECh which might lead to deadlock
-						// we release the lock for a few milliseconds so that heartbeat and this goroutine can continue
-						rf.unlockMutex()
-						time.Sleep(10 * time.Millisecond)
-						rf.lockMutex()
-					}
-				}
-			}
+			rf.onAppendEntryReplySuccess(peerId, entries, ni)
 		} else {
-			if reply.ConflictTerm >= 0 {
-				lastIndexOfTerm := -1
-				for i := len(rf.log) - 1; i >= 0; i-- {
-					if rf.log[i].Term == reply.ConflictTerm {
-						lastIndexOfTerm = i
-						break
-					}
-				}
-				if lastIndexOfTerm >= 0 {
-					rf.nextIndex[peerId] = lastIndexOfTerm + 1
-				} else {
-					rf.nextIndex[peerId] = reply.ConflictIndex
-				}
-			} else {
-				rf.nextIndex[peerId] = reply.ConflictIndex
-			}
-			rf.dLog("AppendEntries reply from %d !success: nextIndex := %d", peerId, ni-1)
+			rf.onAppendEntryReplyFailure(peerId, reply, ni)
 		}
 	}
-	rf.unlockMutex()
 }
 
+func (rf *Raft) onAppendEntryReplyFailure(peerId int, reply AppendEntriesReply, ni int) {
+	if reply.ConflictTerm >= 0 {
+		lastIndexOfTerm := -1
+		for i := len(rf.log) - 1; i >= 0; i-- {
+			if rf.log[i].Term == reply.ConflictTerm {
+				lastIndexOfTerm = i
+				break
+			}
+		}
+		if lastIndexOfTerm >= 0 {
+			rf.nextIndex[peerId] = lastIndexOfTerm + 1
+		} else {
+			rf.nextIndex[peerId] = reply.ConflictIndex
+		}
+	} else {
+		rf.nextIndex[peerId] = reply.ConflictIndex
+	}
+	rf.dLog("AppendEntries reply from %d not success: nextIndex := %d", peerId, ni-1)
+}
+
+func (rf *Raft) onAppendEntryReplySuccess(peerId int, entries []LogEntry, ni int) {
+	if len(entries) > 0 {
+		rf.nextIndex[peerId] = ni + len(entries)
+		rf.dLog("On AE reply success nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
+		rf.matchIndex[peerId] = rf.nextIndex[peerId] - 1
+	}
+
+	savedCommitIndex := rf.commitIndex
+	for i := rf.commitIndex + 1; i < len(rf.log); i++ {
+		if rf.log[i].Term == rf.currentTerm {
+			matchCount := 1
+			for peerId := range rf.peers {
+				if rf.matchIndex[peerId] >= i {
+					matchCount++
+				}
+			}
+			if matchCount*2 > len(rf.peers)+1 {
+				rf.commitIndex = i
+			}
+		}
+	}
+	rf.dLog("AppendEntries reply from %d success: nextIndex := %v, matchIndex := %v; commitIndex := %d", peerId, rf.nextIndex, rf.matchIndex, rf.commitIndex)
+	if rf.commitIndex != savedCommitIndex {
+		rf.dLog("leader sets commitIndex := %d", rf.commitIndex)
+		// Commit index changed: the leader considers new entries to be
+		// committed. Send new entries on the commit channel to this
+		// leader's clients, and notify followers by sending them AEs.
+		rf.newApplyReadyCh <- struct{}{}
+	loop:
+		for {
+			select {
+			case rf.triggerAECh <- struct{}{}:
+				break loop
+			default:
+				// heartbeat goroutine will be waiting on the lock before reading from triggerAECh
+				// this goroutine will hold the lock and be blocked on writing to triggerAECh which might lead to deadlock
+				// we release the lock for a few milliseconds so that heartbeat and this goroutine can continue
+				rf.unlockMutex()
+				time.Sleep(10 * time.Millisecond)
+				rf.lockMutex()
+			}
+		}
+	}
+}
+
+// getGID returns the goroutine ID, useful for debugging
 func getGID() uint64 {
 	b := make([]byte, 64)
 	b = b[:runtime.Stack(b, false)]
@@ -849,10 +877,10 @@ func (rf *Raft) dLog(format string, args ...interface{}) {
 func (rf *Raft) applyChSender() {
 	for range rf.newApplyReadyCh {
 		// Find which entries we have to apply.
+		var entries []LogEntry
 		rf.lockMutex()
 		//savedTerm := rf.currentTerm
 		savedLastApplied := rf.lastApplied
-		var entries []LogEntry
 		if rf.commitIndex > rf.lastApplied {
 			entries = rf.log[rf.lastApplied+1 : rf.commitIndex+1]
 			rf.lastApplied = rf.commitIndex
