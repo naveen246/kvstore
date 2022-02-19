@@ -507,8 +507,10 @@ func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 	rf.dLog("node dead")
+	rf.lockMutex()
 	close(rf.newApplyReadyCh)
-	close(rf.applyCh)
+	//close(rf.applyCh)
+	rf.unlockMutex()
 }
 
 func (rf *Raft) killed() bool {
