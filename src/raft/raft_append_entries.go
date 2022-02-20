@@ -156,7 +156,7 @@ func (rf *Raft) leaderSendAEs() {
 			}
 			ok := rf.sendAppendEntries(peerId, args, &reply)
 			if ok {
-				rf.onAppendEntryReply(peerId, reply, savedCurrentTerm, entries, ni)
+				rf.onAppendEntriesReply(peerId, reply, savedCurrentTerm, entries, ni)
 			} else {
 				rf.dLog("sendAppendEntries failed")
 			}
@@ -183,7 +183,7 @@ func (rf *Raft) getAppendEntriesArgs(ni int, savedCurrentTerm int, entries []Log
 	return args
 }
 
-func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCurrentTerm int, entries []LogEntry, ni int) {
+func (rf *Raft) onAppendEntriesReply(peerId int, reply AppendEntriesReply, savedCurrentTerm int, entries []LogEntry, ni int) {
 	rf.lockMutex()
 	defer rf.unlockMutex()
 	if reply.Term > savedCurrentTerm {
@@ -195,14 +195,14 @@ func (rf *Raft) onAppendEntryReply(peerId int, reply AppendEntriesReply, savedCu
 	rf.dLog("state: %v, reply.term: %v", Leader.String(), reply.Term)
 	if rf.state == Leader && savedCurrentTerm == reply.Term {
 		if reply.Success {
-			rf.onAppendEntryReplySuccess(peerId, entries, ni)
+			rf.onAppendEntriesReplySuccess(peerId, entries, ni)
 		} else {
-			rf.onAppendEntryReplyFailure(peerId, reply, ni)
+			rf.onAppendEntriesReplyFailure(peerId, reply, ni)
 		}
 	}
 }
 
-func (rf *Raft) onAppendEntryReplyFailure(peerId int, reply AppendEntriesReply, ni int) {
+func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply, ni int) {
 	if reply.ConflictTerm >= 0 {
 		lastIndexOfTerm := -1
 		for i := len(rf.log) - 1; i >= 0; i-- {
@@ -222,7 +222,7 @@ func (rf *Raft) onAppendEntryReplyFailure(peerId int, reply AppendEntriesReply, 
 	rf.dLog("AppendEntries reply from %d not success: nextIndex := %d", peerId, ni-1)
 }
 
-func (rf *Raft) onAppendEntryReplySuccess(peerId int, entries []LogEntry, ni int) {
+func (rf *Raft) onAppendEntriesReplySuccess(peerId int, entries []LogEntry, ni int) {
 	if ni+len(entries) > rf.nextIndex[peerId] {
 		rf.nextIndex[peerId] = ni + len(entries)
 		rf.dLog("On AE reply success nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
