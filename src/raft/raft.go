@@ -587,7 +587,7 @@ func (rf *Raft) startElection() {
 			var reply RequestVoteReply
 			ok := rf.sendRequestVote(peerId, &args, &reply)
 			if ok {
-				rf.onRequestVoteReplySuccess(reply, candidateCurrentTerm, votesReceived)
+				rf.onRequestVoteReply(reply, candidateCurrentTerm, votesReceived)
 			} else {
 				rf.dLog("sendRequestVote failed")
 			}
@@ -598,7 +598,7 @@ func (rf *Raft) startElection() {
 	go rf.ticker()
 }
 
-func (rf *Raft) onRequestVoteReplySuccess(reply RequestVoteReply, candidateCurrentTerm int, votesReceived *int) {
+func (rf *Raft) onRequestVoteReply(reply RequestVoteReply, candidateCurrentTerm int, votesReceived *int) {
 	rf.lockMutex()
 	defer rf.unlockMutex()
 	if rf.state != Candidate {
@@ -639,6 +639,7 @@ func (rf *Raft) becomeCandidate() int {
 	rf.currentTerm += 1
 	rf.electionResetEvent = time.Now()
 	rf.votedFor = rf.me
+	rf.persist()
 	rf.dLog("electionResetEvent in startElection")
 	rf.dLog("becomes Candidate (currentTerm=%d); log=%v", rf.currentTerm, rf.log)
 	return rf.currentTerm
@@ -652,6 +653,7 @@ func (rf *Raft) becomeFollower(term int) {
 	rf.currentTerm = term
 	rf.votedFor = -1
 	rf.electionResetEvent = time.Now()
+	rf.persist()
 	rf.dLog("electionResetEvent in becomeFollower")
 	go rf.ticker()
 }
@@ -837,6 +839,11 @@ func (rf *Raft) onAppendEntryReplySuccess(peerId int, entries []LogEntry, ni int
 		// Commit index changed: the leader considers new entries to be
 		// committed. Send new entries on the commit channel to this
 		// leader's clients, and notify followers by sending them AEs.
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Println("Recovered. Error: ", r)
+			}
+		}()
 		rf.newApplyReadyCh <- struct{}{}
 	loop:
 		for {
