@@ -581,39 +581,41 @@ func (rf *Raft) startElection() {
 
 	// Send RequestVote RPCs to all other servers concurrently.
 	for id := range rf.peers {
-		go func(peerId int) {
+		go func(peerId int, votesReceived *int) {
 			args := rf.getRequestVoteArgs(candidateCurrentTerm)
 			rf.dLog("sending RequestVote to %d: %+v", peerId, args)
 			var reply RequestVoteReply
 			ok := rf.sendRequestVote(peerId, &args, &reply)
 			if ok {
-				rf.lockMutex()
-				defer rf.unlockMutex()
-				if rf.state != Candidate {
-					rf.dLog("while waiting for reply, state = %v", rf.state)
-					return
-				}
-
-				if reply.Term > candidateCurrentTerm {
-					rf.dLog("term out of date in RequestVoteReply")
-					rf.becomeFollower(reply.Term)
-					return
-				} else if reply.Term == candidateCurrentTerm && reply.VoteGranted {
-					votesReceived += 1
-					if votesReceived*2 > len(rf.peers)+1 {
-						rf.dLog("wins election with %d votes", votesReceived)
-						rf.startLeader()
-						return
-					}
-				}
+				rf.onRequestVoteReplySuccess(reply, candidateCurrentTerm, votesReceived)
 			} else {
 				rf.dLog("sendRequestVote failed")
 			}
-		}(id)
+		}(id, &votesReceived)
 	}
 
 	// Run another election ticker, in case this election is not successful.
 	go rf.ticker()
+}
+
+func (rf *Raft) onRequestVoteReplySuccess(reply RequestVoteReply, candidateCurrentTerm int, votesReceived *int) {
+	rf.lockMutex()
+	defer rf.unlockMutex()
+	if rf.state != Candidate {
+		rf.dLog("while waiting for reply, state = %v", rf.state)
+		return
+	}
+
+	if reply.Term > candidateCurrentTerm {
+		rf.dLog("term out of date in RequestVoteReply")
+		rf.becomeFollower(reply.Term)
+	} else if reply.Term == candidateCurrentTerm && reply.VoteGranted {
+		*votesReceived += 1
+		if *votesReceived*2 > len(rf.peers)+1 {
+			rf.dLog("wins election with %d votes", *votesReceived)
+			rf.startLeader()
+		}
+	}
 }
 
 func (rf *Raft) getRequestVoteArgs(savedCurrentTerm int) RequestVoteArgs {
