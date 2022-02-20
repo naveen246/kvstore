@@ -490,6 +490,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.currentTerm
 		isLeader = true
 		rf.unlockMutex()
+		rf.dLog("Start agreement: Send to triggerAECh channel")
 		rf.triggerAECh <- struct{}{}
 		return index, term, isLeader
 	}
@@ -736,7 +737,9 @@ func (rf *Raft) leaderSendAEs() {
 
 			rf.dLog("sending AppendEntries to %v: ni=%d, args=%v", peerId, ni, args)
 			var reply AppendEntriesReply
-			rf.dLog("Calling rf.sendAppendEntries")
+			if len(entries) > 0 {
+				rf.dLog("Calling rf.sendAppendEntries with %d entries: %v", len(entries), entries)
+			}
 			ok := rf.sendAppendEntries(peerId, args, &reply)
 			if ok {
 				rf.onAppendEntryReply(peerId, reply, savedCurrentTerm, entries, ni)
@@ -806,7 +809,7 @@ func (rf *Raft) onAppendEntryReplyFailure(peerId int, reply AppendEntriesReply, 
 }
 
 func (rf *Raft) onAppendEntryReplySuccess(peerId int, entries []LogEntry, ni int) {
-	if len(entries) > 0 {
+	if ni+len(entries) > rf.nextIndex[peerId] {
 		rf.nextIndex[peerId] = ni + len(entries)
 		rf.dLog("On AE reply success nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
 		rf.matchIndex[peerId] = rf.nextIndex[peerId] - 1
@@ -837,6 +840,7 @@ func (rf *Raft) onAppendEntryReplySuccess(peerId int, entries []LogEntry, ni int
 		for {
 			select {
 			case rf.triggerAECh <- struct{}{}:
+				rf.dLog("Send to triggerAECh channel")
 				break loop
 			default:
 				// heartbeat goroutine will be waiting on the lock before reading from triggerAECh
