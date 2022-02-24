@@ -8,11 +8,11 @@ package raft
 // rf = Make(...)
 //   create a new Raft server.
 // rf.Start(command interface{}) (index, term, isLeader)
-//   start agreement on a new log entry
+//   start agreement on a new logEntries entry
 // rf.GetState() (term, isLeader)
 //   ask a Raft for its current term, and whether it thinks it is leader
 // ApplyMsg
-//   each time a new entry is committed to the log, each Raft peer
+//   each time a new entry is committed to the logEntries, each Raft peer
 //   should send an ApplyMsg to the service (or tester)
 //   in the same server.
 //
@@ -45,11 +45,11 @@ const (
 )
 
 //
-// ApplyMsg : as each Raft peer becomes aware that successive log entries are
+// ApplyMsg : as each Raft peer becomes aware that successive logEntries entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
 // CommandValid to true to indicate that the ApplyMsg contains a newly
-// committed log entry.
+// committed logEntries entry.
 //
 // in part 2D you'll want to send other kinds of messages (e.g.,
 // snapshots) on the applyCh, but set CommandValid to false for these
@@ -109,12 +109,12 @@ type Raft struct {
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
-	// applyCh is the channel where this node is going to report committed log
+	// applyCh is the channel where this node is going to report committed logEntries
 	// entries. It's passed in by the client during construction.
 	applyCh chan<- ApplyMsg
 
 	// newApplyReadyCh is an internal notification channel used by goroutines
-	// that commit new entries to the log to notify that these entries may be sent
+	// that commit new entries to the logEntries to notify that these entries may be sent
 	// on applyCh.
 	newApplyReadyCh chan struct{}
 
@@ -129,7 +129,7 @@ type Raft struct {
 	// Persistent raft state on all servers
 	currentTerm int
 	votedFor    int
-	log         []LogEntry
+	logEntries  []LogEntry
 
 	// Volatile raft state on all servers
 	commitIndex        int
@@ -142,13 +142,13 @@ type Raft struct {
 	matchIndex map[int]int
 }
 
-// lastLogIndexAndTerm returns the last log index and the last log entry's term
-// (or -1 if there's no log) for this server.
+// lastLogIndexAndTerm returns the last logEntries index and the last logEntries entry's term
+// (or -1 if there's no logEntries) for this server.
 // Expects rf.mu to be locked.
 func (rf *Raft) lastLogIndexAndTerm() (int, int) {
-	if len(rf.log) > 0 {
-		lastIndex := len(rf.log) - 1
-		lastTerm := rf.log[lastIndex].Term
+	if len(rf.logEntries) > 0 {
+		lastIndex := len(rf.logEntries) - 1
+		lastTerm := rf.logEntries[lastIndex].Term
 		return lastIndex, lastTerm
 	}
 	return -1, -1
@@ -182,7 +182,7 @@ func (rf *Raft) persist() {
 	logFatal(err)
 	err = e.Encode(rf.votedFor)
 	logFatal(err)
-	err = e.Encode(rf.log)
+	err = e.Encode(rf.logEntries)
 	logFatal(err)
 
 	data := w.Bytes()
@@ -211,7 +211,7 @@ func (rf *Raft) readPersist(data []byte) {
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
-		rf.log = log
+		rf.logEntries = log
 	}
 }
 
@@ -228,8 +228,8 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 
 // Snapshot : the service says it has created a snapshot that has
 // all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
+// service no longer needs the logEntries through (and including)
+// that index. Raft should now trim its logEntries as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 
@@ -238,10 +238,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 //
 // Start agreement on the next command
 // the service using Raft (e.g. a k/v server) wants to start
-// agreement on the next command to be appended to Raft's log. if this
+// agreement on the next command to be appended to Raft's logEntries. if this
 // server isn't the leader, returns false. otherwise, start the
 // agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
+// command will ever be committed to the Raft logEntries, since the leader
 // may fail or lose an election. even if the Raft instance has been killed,
 // this function should return gracefully.
 //
@@ -258,14 +258,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.lockMutex()
 	if rf.state == Leader && !rf.killed() {
-		rf.dLog("Start agreement on next command: %v\t log: %v at node %v", command, rf.log, rf.me)
-		rf.log = append(rf.log, LogEntry{
+		rf.dLog("Start agreement on next command: %v\t logEntries: %v at node %v", command, rf.logEntries, rf.me)
+		rf.logEntries = append(rf.logEntries, LogEntry{
 			Command: command,
 			Term:    rf.currentTerm,
 		})
 		rf.persist()
-		rf.dLog("... log=%v", rf.log)
-		index = len(rf.log) - 1
+		rf.dLog("... logEntries=%v", rf.logEntries)
+		index = len(rf.logEntries) - 1
 		term = rf.currentTerm
 		isLeader = true
 		rf.unlockMutex()
@@ -361,7 +361,7 @@ func (rf *Raft) becomeCandidate() int {
 	rf.votedFor = rf.me
 	rf.persist()
 	rf.dLog("electionResetEvent in startElection")
-	rf.dLog("becomes Candidate (currentTerm=%d); log=%v", rf.currentTerm, rf.log)
+	rf.dLog("becomes Candidate (currentTerm=%d); logEntries=%v", rf.currentTerm, rf.logEntries)
 	return rf.currentTerm
 }
 
@@ -369,7 +369,7 @@ func (rf *Raft) becomeCandidate() int {
 // Expects rf.mu to be locked.
 func (rf *Raft) becomeFollower(term int) {
 	rf.state = Follower
-	rf.dLog("becomes Follower with term=%d; log=%v", term, rf.log)
+	rf.dLog("becomes Follower with term=%d; logEntries=%v", term, rf.logEntries)
 	rf.currentTerm = term
 	rf.votedFor = -1
 	rf.electionResetEvent = time.Now()
@@ -383,10 +383,10 @@ func (rf *Raft) becomeLeader() {
 	rf.state = Leader
 
 	for peerId := range rf.peers {
-		rf.nextIndex[peerId] = len(rf.log)
+		rf.nextIndex[peerId] = len(rf.logEntries)
 		rf.matchIndex[peerId] = -1
 	}
-	rf.dLog("becomes Leader; term=%d, nextIndex=%v, matchIndex=%v; log=%v", rf.currentTerm, rf.nextIndex, rf.matchIndex, rf.log)
+	rf.dLog("becomes Leader; term=%d, nextIndex=%v, matchIndex=%v; logEntries=%v", rf.currentTerm, rf.nextIndex, rf.matchIndex, rf.logEntries)
 }
 
 // startLeader switches node into a leader state and begins process of heartbeats.
@@ -474,7 +474,7 @@ func (rf *Raft) applyChSender() {
 		//savedTerm := rf.currentTerm
 		savedLastApplied := rf.lastApplied
 		if rf.commitIndex > rf.lastApplied {
-			entries = rf.log[rf.lastApplied+1 : rf.commitIndex+1]
+			entries = rf.logEntries[rf.lastApplied+1 : rf.commitIndex+1]
 			rf.lastApplied = rf.commitIndex
 		}
 		rf.unlockMutex()
@@ -521,7 +521,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = -1
 	rf.nextIndex = make(map[int]int)
 	rf.matchIndex = make(map[int]int)
-	rf.log = []LogEntry{{
+	rf.logEntries = []LogEntry{{
 		Command: byte(1),
 		Term:    0,
 	}}
