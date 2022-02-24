@@ -70,7 +70,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	lastLogIndex, lastLogTerm := rf.lastLogIndexAndTerm()
-	rf.dLog("RequestVote: %+v [currentTerm=%d, votedFor=%d, log index/term=(%d, %d)]", args, rf.currentTerm, rf.votedFor, lastLogIndex, lastLogTerm)
+	rf.dLog("RequestVote: %+v [currentTerm=%d, votedFor=%d, logEntries index/term=(%d, %d)]", args, rf.currentTerm, rf.votedFor, lastLogIndex, lastLogTerm)
 
 	if args.Term > rf.currentTerm {
 		rf.dLog("... term out of date in RequestVote")
