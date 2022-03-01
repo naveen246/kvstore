@@ -132,13 +132,22 @@ type Raft struct {
 	logEntries  []LogEntry
 
 	// Volatile raft state on all servers
-	commitIndex        int
-	lastApplied        int
+	// index at which last commit has happened.
+	// commitIndex on leader is set to max logIndex at which LogEntry matches the majority of peers
+	// commitIndex on follower is set to min(leaderCommitIndex, logLength-1)
+	commitIndex int
+
+	// lastApplied is the index of last logEntry that has been sent on applyCh channel back to client.
+	lastApplied int
+
+	// state can be Follower, Candidate or Leader
 	state              NodeState
 	electionResetEvent time.Time
 
 	// Volatile raft state on leaders
-	nextIndex  map[int]int
+	// nextIndex[peerId] is the log index at which the next LogEntry is appended
+	nextIndex map[int]int
+	// matchIndex[peerId] is the log index at which the LogEntry matches that of leader
 	matchIndex map[int]int
 }
 
@@ -146,12 +155,25 @@ type Raft struct {
 // (or -1 if there's no logEntries) for this server.
 // Expects rf.mu to be locked.
 func (rf *Raft) lastLogIndexAndTerm() (int, int) {
-	if len(rf.logEntries) > 0 {
-		lastIndex := len(rf.logEntries) - 1
-		lastTerm := rf.logEntries[lastIndex].Term
+	if rf.logLength() > 0 {
+		lastIndex := rf.logLength() - 1
+		lastTerm := rf.logEntryAtIndex(lastIndex).Term
 		return lastIndex, lastTerm
 	}
 	return -1, -1
+}
+
+func (rf *Raft) logEntryAtIndex(index int) LogEntry {
+	return rf.logEntries[index]
+}
+
+// logEntriesBetween returns slice starting at and including startIndex upto and excluding endIndex
+func (rf *Raft) logEntriesBetween(startIndex int, endIndex int) []LogEntry {
+	return rf.logEntries[startIndex:endIndex]
+}
+
+func (rf *Raft) logLength() int {
+	return len(rf.logEntries)
 }
 
 // GetState : return currentTerm and whether this server
@@ -265,7 +287,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		})
 		rf.persist()
 		rf.dLog("... logEntries=%v", rf.logEntries)
-		index = len(rf.logEntries) - 1
+		index = rf.logLength() - 1
 		term = rf.currentTerm
 		isLeader = true
 		rf.unlockMutex()
@@ -383,7 +405,7 @@ func (rf *Raft) becomeLeader() {
 	rf.state = Leader
 
 	for peerId := range rf.peers {
-		rf.nextIndex[peerId] = len(rf.logEntries)
+		rf.nextIndex[peerId] = rf.logLength()
 		rf.matchIndex[peerId] = -1
 	}
 	rf.dLog("becomes Leader; term=%d, nextIndex=%v, matchIndex=%v; logEntries=%v", rf.currentTerm, rf.nextIndex, rf.matchIndex, rf.logEntries)
@@ -474,7 +496,7 @@ func (rf *Raft) applyChSender() {
 		//savedTerm := rf.currentTerm
 		savedLastApplied := rf.lastApplied
 		if rf.commitIndex > rf.lastApplied {
-			entries = rf.logEntries[rf.lastApplied+1 : rf.commitIndex+1]
+			entries = rf.logEntriesBetween(rf.lastApplied+1, rf.commitIndex+1)
 			rf.lastApplied = rf.commitIndex
 		}
 		rf.unlockMutex()
