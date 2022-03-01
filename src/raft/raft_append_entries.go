@@ -116,8 +116,7 @@ func (rf *Raft) updateConflictIndex(args AppendEntriesArgs, reply *AppendEntries
 		reply.ConflictIndex = rf.logLength()
 		reply.ConflictTerm = -1
 	} else {
-		// PrevLogIndex points within our logEntries, but PrevLogTerm doesn't match
-		// rf.logEntries[PrevLogIndex].
+		// PrevLogIndex points within our logEntries, but PrevLogTerm doesn't match rf.logEntries[PrevLogIndex].
 		reply.ConflictTerm = rf.logEntryAtIndex(args.PrevLogIndex).Term
 
 		var i int

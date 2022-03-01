@@ -192,6 +192,10 @@ func (rf *Raft) logEntriesBetween(startIndex int, endIndex int) []LogEntry {
 	return rf.logEntries[startIndex:endIndex]
 }
 
+func (rf *Raft) logLength() int {
+	return rf.snapshotIndex + 1 + len(rf.logEntries)
+}
+
 // GetState : return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -469,10 +473,6 @@ func (rf *Raft) startLeader() {
 			}
 		}
 	}(HeartBeatTimeout)
-}
-
-func (rf *Raft) logLength() int {
-	return rf.snapshotIndex + 1 + len(rf.logEntries)
 }
 
 // getGID returns the goroutine ID, useful for debugging
