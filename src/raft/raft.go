@@ -114,9 +114,9 @@ type Raft struct {
 	applyCh chan<- ApplyMsg
 
 	// newApplyReadyCh is an internal notification channel used by goroutines
-	// that commit new entries to the logEntries to notify that these entries may be sent
+	// that commit new entries to the logEntries to notify that these Command entries may be sent
 	// on applyCh.
-	newApplyReadyCh chan struct{}
+	newApplyReadyCh chan ApplyMsg
 
 	// triggerAECh is an internal notification channel used to trigger
 	// sending new AEs to followers when interesting changes occurred.
@@ -127,18 +127,30 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// Persistent raft state on all servers
-	currentTerm int
-	votedFor    int
-	logEntries  []LogEntry
+	currentTerm   int
+	votedFor      int
+	logEntries    []LogEntry
+	snapshotTerm  int
+	snapshotIndex int
 
 	// Volatile raft state on all servers
-	commitIndex        int
-	lastApplied        int
+	// index at which last commit has happened.
+	// commitIndex on leader is set to max logIndex at which LogEntry matches the majority of peers
+	// commitIndex on follower is set to min(leaderCommitIndex, logLength-1)
+	commitIndex int
+
+	// lastApplied is the index of last logEntry that has been sent on applyCh channel back to client.
+	lastApplied int
+
+	// state can be Follower, Candidate or Leader
 	state              NodeState
 	electionResetEvent time.Time
+	snapshot           []byte
 
 	// Volatile raft state on leaders
-	nextIndex  map[int]int
+	// nextIndex[peerId] is the log index at which the next LogEntry is appended
+	nextIndex map[int]int
+	// matchIndex[peerId] is the log index at which the LogEntry matches that of leader
 	matchIndex map[int]int
 }
 
@@ -146,12 +158,38 @@ type Raft struct {
 // (or -1 if there's no logEntries) for this server.
 // Expects rf.mu to be locked.
 func (rf *Raft) lastLogIndexAndTerm() (int, int) {
-	if len(rf.logEntries) > 0 {
-		lastIndex := len(rf.logEntries) - 1
-		lastTerm := rf.logEntries[lastIndex].Term
+	if rf.logLength() > 0 {
+		lastIndex := rf.logLength() - 1
+		lastTerm := rf.logEntryAtIndex(lastIndex).Term
 		return lastIndex, lastTerm
 	}
 	return -1, -1
+}
+
+func (rf *Raft) logEntryAtIndex(index int) LogEntry {
+	if index <= rf.snapshotIndex || len(rf.logEntries) <= index-(rf.snapshotIndex+1) {
+		return LogEntry{
+			Command: nil,
+			Term:    0,
+		}
+	}
+	return rf.logEntries[index-(rf.snapshotIndex+1)]
+}
+
+// logEntriesBetween returns slice starting at and including startIndex upto and excluding endIndex
+func (rf *Raft) logEntriesBetween(startIndex int, endIndex int) []LogEntry {
+	if endIndex <= startIndex || len(rf.logEntries) == 0 {
+		return []LogEntry{}
+	}
+	startIndex = startIndex - (rf.snapshotIndex + 1)
+	endIndex = endIndex - (rf.snapshotIndex + 1)
+	if startIndex < 0 {
+		startIndex = 0
+	}
+	if endIndex < 0 {
+		endIndex = 0
+	}
+	return rf.logEntries[startIndex:endIndex]
 }
 
 // GetState : return currentTerm and whether this server
@@ -184,16 +222,20 @@ func (rf *Raft) persist() {
 	logFatal(err)
 	err = e.Encode(rf.logEntries)
 	logFatal(err)
+	err = e.Encode(rf.snapshotTerm)
+	logFatal(err)
+	err = e.Encode(rf.snapshotIndex)
+	logFatal(err)
 
 	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
+	rf.persister.SaveStateAndSnapshot(data, rf.snapshot)
 	rf.dLog("persist(): time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
 }
 
 //
 // restore previously persisted state.
 // Expects rf.mu to be locked.
-func (rf *Raft) readPersist(data []byte) {
+func (rf *Raft) readPersist(data []byte, snapshot []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
@@ -203,39 +245,25 @@ func (rf *Raft) readPersist(data []byte) {
 	d := labgob.NewDecoder(r)
 	var currentTerm int
 	var votedFor int
-	var log []LogEntry
+	var logEntries []LogEntry
+	var snapshotTerm int
+	var snapshotIndex int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil {
+		d.Decode(&logEntries) != nil ||
+		d.Decode(&snapshotTerm) != nil ||
+		d.Decode(&snapshotIndex) != nil {
 		logFatal(errors.New("error while decoding persisted data"))
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
-		rf.logEntries = log
+		rf.logEntries = logEntries
+		rf.snapshotTerm = snapshotTerm
+		rf.snapshotIndex = snapshotIndex
 	}
+	rf.snapshot = snapshot
 }
 
-//
-// CondInstallSnapshot A service wants to switch to snapshot.  Only do so if Raft hasn't
-// had more recent info since it communicate the snapshot on applyCh.
-//
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
-	// Your code here (2D).
-
-	return true
-}
-
-// Snapshot : the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the logEntries through (and including)
-// that index. Raft should now trim its logEntries as much as possible.
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-
-}
-
-//
 // Start agreement on the next command
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's logEntries. if this
@@ -263,9 +291,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Command: command,
 			Term:    rf.currentTerm,
 		})
+		rf.dLog("[%d] leader - logEntries after append: %v at node %v\n", rf.me, rf.logEntries, rf.me)
 		rf.persist()
 		rf.dLog("... logEntries=%v", rf.logEntries)
-		index = len(rf.logEntries) - 1
+		index = rf.logLength() - 1
 		term = rf.currentTerm
 		isLeader = true
 		rf.unlockMutex()
@@ -383,7 +412,7 @@ func (rf *Raft) becomeLeader() {
 	rf.state = Leader
 
 	for peerId := range rf.peers {
-		rf.nextIndex[peerId] = len(rf.logEntries)
+		rf.nextIndex[peerId] = rf.logLength()
 		rf.matchIndex[peerId] = -1
 	}
 	rf.dLog("becomes Leader; term=%d, nextIndex=%v, matchIndex=%v; logEntries=%v", rf.currentTerm, rf.nextIndex, rf.matchIndex, rf.logEntries)
@@ -442,6 +471,10 @@ func (rf *Raft) startLeader() {
 	}(HeartBeatTimeout)
 }
 
+func (rf *Raft) logLength() int {
+	return rf.snapshotIndex + 1 + len(rf.logEntries)
+}
+
 // getGID returns the goroutine ID, useful for debugging
 func getGID() uint64 {
 	b := make([]byte, 64)
@@ -467,32 +500,84 @@ func (rf *Raft) dLog(format string, args ...interface{}) {
 // the client consumes new committed entries. Returns when newApplyReadyCh is
 // closed.
 func (rf *Raft) applyChSender() {
-	for range rf.newApplyReadyCh {
-		// Find which entries we have to apply.
-		var entries []LogEntry
-		rf.lockMutex()
-		//savedTerm := rf.currentTerm
-		savedLastApplied := rf.lastApplied
-		if rf.commitIndex > rf.lastApplied {
-			entries = rf.logEntries[rf.lastApplied+1 : rf.commitIndex+1]
-			rf.lastApplied = rf.commitIndex
-		}
-		rf.unlockMutex()
-		rf.dLog("applyChSender entries=%v, savedLastApplied=%d", entries, savedLastApplied)
+	for applyMsg := range rf.newApplyReadyCh {
+		if applyMsg.CommandValid {
+			// Find which entries we have to apply.
+			var entries []LogEntry
+			rf.lockMutex()
+			//savedTerm := rf.currentTerm
+			savedLastApplied := rf.lastApplied
+			if rf.commitIndex > rf.lastApplied {
+				entries = rf.logEntriesBetween(rf.lastApplied+1, rf.commitIndex+1)
+				rf.lastApplied = rf.commitIndex
+			}
+			rf.unlockMutex()
+			rf.dLog("applyChSender entries=%v, savedLastApplied=%d", entries, savedLastApplied)
 
-		for i, entry := range entries {
+			for i, entry := range entries {
+				rf.dLog("[%d] pushing to applyCh chan cmd: %v, CommandIndex: %d\n", rf.me, entry.Command, savedLastApplied+i+1)
+				rf.applyCh <- ApplyMsg{
+					CommandValid:  true,
+					Command:       entry.Command,
+					CommandIndex:  savedLastApplied + i + 1,
+					SnapshotValid: false,
+					Snapshot:      nil,
+					SnapshotTerm:  0,
+					SnapshotIndex: 0,
+				}
+			}
+		} else {
+			rf.lockMutex()
+			snapshot := rf.snapshot
+			snapshotIndex := rf.snapshotIndex
+			snapshotTerm := rf.snapshotTerm
+			rf.lastApplied = snapshotIndex
+			rf.unlockMutex()
+			rf.dLog("applySnapshotChSender snapshot=%v, snapshotIndex=%d, snapshotTerm=%d", snapshot, snapshotIndex, snapshotTerm)
 			rf.applyCh <- ApplyMsg{
-				CommandValid:  true,
-				Command:       entry.Command,
-				CommandIndex:  savedLastApplied + i + 1,
-				SnapshotValid: false,
-				Snapshot:      nil,
-				SnapshotTerm:  0,
-				SnapshotIndex: 0,
+				CommandValid:  false,
+				Command:       nil,
+				CommandIndex:  0,
+				SnapshotValid: true,
+				Snapshot:      snapshot,
+				SnapshotTerm:  snapshotTerm,
+				SnapshotIndex: snapshotIndex,
 			}
 		}
 	}
 	rf.dLog("applyChSender done")
+}
+
+//
+// CondInstallSnapshot A service wants to switch to snapshot.  Only do so if Raft hasn't
+// had more recent info since it communicate the snapshot on applyCh.
+//
+func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
+	// Your code here (2D).
+	return true
+}
+
+// Snapshot : the service says it has created a snapshot that has
+// all info up to and including index. this means the
+// service no longer needs the logEntries through (and including)
+// that index. Raft should now trim its logEntries as much as possible.
+func (rf *Raft) Snapshot(index int, snapshot []byte) {
+	// Your code here (2D).
+	rf.lockMutex()
+	savedCurrentTerm := rf.currentTerm
+	if rf.state == Leader && !rf.killed() {
+		args := InstallSnapshotArgs{
+			Term:              rf.currentTerm,
+			LeaderId:          rf.me,
+			LastIncludedIndex: index,
+			LastIncludedTerm:  0,
+			Data:              snapshot,
+		}
+		rf.unlockMutex()
+		rf.snapshotToPeers(args, savedCurrentTerm)
+	} else {
+		rf.unlockMutex()
+	}
 }
 
 //
@@ -513,7 +598,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.applyCh = applyCh
-	rf.newApplyReadyCh = make(chan struct{}, 16)
+	rf.newApplyReadyCh = make(chan ApplyMsg, 16)
 	rf.triggerAECh = make(chan struct{}, 1)
 	rf.state = Follower
 	rf.votedFor = -1
@@ -525,13 +610,14 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		Command: byte(1),
 		Term:    0,
 	}}
+	rf.snapshotIndex = -1
 
 	atomic.StoreInt32(&rf.dead, 0)
 
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
 
 	// start ticker goroutine to start elections
 	go func() {

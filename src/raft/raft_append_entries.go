@@ -1,6 +1,8 @@
 package raft
 
-import "time"
+import (
+	"time"
+)
 
 // AppendEntriesArgs See figure 2 in the paper.
 type AppendEntriesArgs struct {
@@ -52,7 +54,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		rf.dLog("electionResetEvent in AppendEntries")
 		// check if our logEntries contain an entry at PrevLogIndex whose term matches PrevLogTerm
 		if args.PrevLogIndex == -1 ||
-			(args.PrevLogIndex < len(rf.logEntries) && args.PrevLogTerm == rf.logEntries[args.PrevLogIndex].Term) {
+			(args.PrevLogIndex < rf.logLength() && args.PrevLogTerm == rf.logEntryAtIndex(args.PrevLogIndex).Term) {
 			rf.updateLog(args, reply)
 		} else {
 			rf.updateConflictIndex(args, reply)
@@ -74,11 +76,14 @@ func (rf *Raft) updateLog(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	logInsertIndex := args.PrevLogIndex + 1
 	newEntriesIndex := 0
 
+	rf.dLog("updateLog AppendEntriesArgs: %v\n", rf.me, args)
+	rf.dLog("current logEntries before update: %v\nsnapshotIndex: %d", rf.me, rf.logEntries, rf.snapshotIndex)
+
 	for {
-		if logInsertIndex >= len(rf.logEntries) || newEntriesIndex >= len(args.Entries) {
+		if logInsertIndex >= rf.logLength() || newEntriesIndex >= len(args.Entries) {
 			break
 		}
-		if rf.logEntries[logInsertIndex].Term != args.Entries[newEntriesIndex].Term {
+		if rf.logEntryAtIndex(logInsertIndex).Term != args.Entries[newEntriesIndex].Term {
 			break
 		}
 		logInsertIndex++
@@ -91,15 +96,15 @@ func (rf *Raft) updateLog(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	//   term mismatches with the corresponding logEntries entry
 	if newEntriesIndex < len(args.Entries) {
 		rf.dLog("... inserting entries %v from index %d", args.Entries[newEntriesIndex:], logInsertIndex)
-		rf.logEntries = append(rf.logEntries[:logInsertIndex], args.Entries[newEntriesIndex:]...)
-		rf.dLog("... logEntries is now: %v", rf.logEntries)
+		rf.logEntries = append(rf.logEntriesBetween(0, logInsertIndex), args.Entries[newEntriesIndex:]...)
+		rf.dLog("... logEntries is now: %v\tsnapshotIndex: %d", rf.logEntries, rf.snapshotIndex)
 	}
 
 	// Set commitIndex
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = intMin(args.LeaderCommit, len(rf.logEntries)-1)
-		rf.dLog("... setting commitIndex=%d", rf.commitIndex)
-		rf.newApplyReadyCh <- struct{}{}
+		rf.commitIndex = intMin(args.LeaderCommit, rf.logLength()-1)
+		rf.dLog("...send cmd to newApplyReadyCh. setting commitIndex=%d", rf.commitIndex)
+		rf.newApplyReadyCh <- ApplyMsg{CommandValid: true}
 	}
 }
 
@@ -107,17 +112,17 @@ func (rf *Raft) updateConflictIndex(args AppendEntriesArgs, reply *AppendEntries
 	// No match for PrevLogIndex/PrevLogTerm. Populate
 	// ConflictIndex/ConflictTerm to help the leader bring us up to date
 	// quickly.
-	if args.PrevLogIndex >= len(rf.logEntries) {
-		reply.ConflictIndex = len(rf.logEntries)
+	if args.PrevLogIndex >= rf.logLength() {
+		reply.ConflictIndex = rf.logLength()
 		reply.ConflictTerm = -1
 	} else {
 		// PrevLogIndex points within our logEntries, but PrevLogTerm doesn't match
 		// rf.logEntries[PrevLogIndex].
-		reply.ConflictTerm = rf.logEntries[args.PrevLogIndex].Term
+		reply.ConflictTerm = rf.logEntryAtIndex(args.PrevLogIndex).Term
 
 		var i int
-		for i = args.PrevLogIndex - 1; i >= 0; i-- {
-			if rf.logEntries[i].Term != reply.ConflictTerm {
+		for i = args.PrevLogIndex - 1; i >= rf.snapshotIndex+1; i-- {
+			if rf.logEntryAtIndex(i).Term != reply.ConflictTerm {
 				break
 			}
 		}
@@ -132,7 +137,7 @@ func intMin(a, b int) int {
 	return b
 }
 
-// leaderSendAEs sends a round of AEs to all peers, collects their
+// leaderSendAEs - Leader sends a round of AEs to all peers, collects their
 // replies and adjusts node's state.
 func (rf *Raft) leaderSendAEs() {
 	rf.lockMutex()
@@ -144,7 +149,7 @@ func (rf *Raft) leaderSendAEs() {
 			rf.dLog("Created goroutine from leaderSendAEs for peerId:%d\n", peerId)
 			rf.lockMutex()
 			ni := rf.nextIndex[peerId]
-			entries := rf.logEntries[ni:]
+			entries := rf.logEntriesBetween(ni, rf.logLength())
 			rf.dLog("reading nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
 			args := rf.getAppendEntriesArgs(ni, savedCurrentTerm, entries)
 			rf.unlockMutex()
@@ -169,7 +174,7 @@ func (rf *Raft) getAppendEntriesArgs(ni int, savedCurrentTerm int, entries []Log
 	prevLogIndex := ni - 1
 	prevLogTerm := -1
 	if prevLogIndex >= 0 {
-		prevLogTerm = rf.logEntries[prevLogIndex].Term
+		prevLogTerm = rf.logEntryAtIndex(prevLogIndex).Term
 	}
 
 	args := AppendEntriesArgs{
@@ -205,8 +210,8 @@ func (rf *Raft) onAppendEntriesReply(peerId int, reply AppendEntriesReply, saved
 func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply, ni int) {
 	if reply.ConflictTerm >= 0 {
 		lastIndexOfTerm := -1
-		for i := len(rf.logEntries) - 1; i >= 0; i-- {
-			if rf.logEntries[i].Term == reply.ConflictTerm {
+		for i := rf.logLength() - 1; i >= rf.snapshotIndex+1; i-- {
+			if rf.logEntryAtIndex(i).Term == reply.ConflictTerm {
 				lastIndexOfTerm = i
 				break
 			}
@@ -230,8 +235,8 @@ func (rf *Raft) onAppendEntriesReplySuccess(peerId int, entries []LogEntry, ni i
 	}
 
 	savedCommitIndex := rf.commitIndex
-	for i := rf.commitIndex + 1; i < len(rf.logEntries); i++ {
-		if rf.logEntries[i].Term == rf.currentTerm {
+	for i := rf.commitIndex + 1; i < rf.logLength(); i++ {
+		if rf.logEntryAtIndex(i).Term == rf.currentTerm {
 			matchCount := 1
 			for peerId := range rf.peers {
 				if rf.matchIndex[peerId] >= i {
@@ -254,7 +259,8 @@ func (rf *Raft) onAppendEntriesReplySuccess(peerId int, entries []LogEntry, ni i
 				rf.dLog("Recovered. Error: ", r)
 			}
 		}()
-		rf.newApplyReadyCh <- struct{}{}
+		rf.dLog("[%d] send cmd to newApplyReadyCh in onAppendEntriesReplySuccess ... setting commitIndex=%d\n", rf.me, rf.commitIndex)
+		rf.newApplyReadyCh <- ApplyMsg{CommandValid: true}
 	loop:
 		for {
 			select {
