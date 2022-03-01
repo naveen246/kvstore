@@ -1,7 +1,5 @@
 package raft
 
-import "time"
-
 //
 // RequestVoteArgs : RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -72,18 +70,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	lastLogIndex, lastLogTerm := rf.lastLogIndexAndTerm()
 	rf.dLog("RequestVote: %+v [currentTerm=%d, votedFor=%d, logEntries index/term=(%d, %d)]", args, rf.currentTerm, rf.votedFor, lastLogIndex, lastLogTerm)
 
-	if args.Term > rf.currentTerm {
-		rf.dLog("... term out of date in RequestVote")
-		rf.becomeFollower(args.Term)
-	}
-
 	logOk := args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)
-	termOk := args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId)
+	notVotedForOthers := rf.votedFor == -1 || rf.votedFor == args.CandidateId
+	termOk := args.Term > rf.currentTerm || (args.Term == rf.currentTerm && notVotedForOthers)
 
 	if logOk && termOk {
-		reply.VoteGranted = true
+		rf.becomeFollower(args.Term)
 		rf.votedFor = args.CandidateId
-		rf.electionResetEvent = time.Now()
+		reply.VoteGranted = true
 		rf.dLog("electionResetEvent in RequestVote")
 	} else {
 		reply.VoteGranted = false
@@ -98,11 +92,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) startElection() {
 	candidateCurrentTerm := rf.becomeCandidate()
 	votesReceived := 1
+	args := rf.getRequestVoteArgs(candidateCurrentTerm)
 
 	// Send RequestVote RPCs to all other servers concurrently.
 	for id := range rf.peers {
+		if id == rf.me {
+			continue
+		}
 		go func(peerId int, votesReceived *int) {
-			args := rf.getRequestVoteArgs(candidateCurrentTerm)
 			rf.dLog("sending RequestVote to %d: %+v", peerId, args)
 			var reply RequestVoteReply
 			ok := rf.sendRequestVote(peerId, &args, &reply)
@@ -119,15 +116,13 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) getRequestVoteArgs(savedCurrentTerm int) RequestVoteArgs {
-	rf.lockMutex()
-	defer rf.unlockMutex()
-	savedLastLogIndex, savedLastLogTerm := rf.lastLogIndexAndTerm()
+	lastLogIndex, lastLogTerm := rf.lastLogIndexAndTerm()
 
 	args := RequestVoteArgs{
 		Term:         savedCurrentTerm,
 		CandidateId:  rf.me,
-		LastLogIndex: savedLastLogIndex,
-		LastLogTerm:  savedLastLogTerm,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
 	}
 	return args
 }
@@ -145,7 +140,7 @@ func (rf *Raft) onRequestVoteReply(reply RequestVoteReply, candidateCurrentTerm 
 		rf.becomeFollower(reply.Term)
 	} else if reply.Term == candidateCurrentTerm && reply.VoteGranted {
 		*votesReceived += 1
-		if *votesReceived*2 > len(rf.peers)+1 {
+		if *votesReceived*2 >= len(rf.peers)+1 {
 			rf.dLog("wins election with %d votes", *votesReceived)
 			rf.startLeader()
 		}

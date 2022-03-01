@@ -36,7 +36,7 @@ import (
 	"6.824/labrpc"
 )
 
-const DebugMode = false
+const DebugMode = true
 
 const (
 	ElectionTimeout  = 300 * time.Millisecond
@@ -140,7 +140,7 @@ type Raft struct {
 	// lastApplied is the index of last logEntry that has been sent on applyCh channel back to client.
 	lastApplied int
 
-	// state can be Follower, Candidate or Leader
+	// currentRole can be Follower, Candidate or Leader
 	currentRole        NodeState
 	electionResetEvent time.Time
 
@@ -377,10 +377,10 @@ func (rf *Raft) ticker() {
 // Expects rf.mu to be locked.
 func (rf *Raft) becomeCandidate() int {
 	rf.dLog("startElection currentRole: %v", rf.currentRole)
-	rf.currentRole = Candidate
 	rf.currentTerm += 1
-	rf.electionResetEvent = time.Now()
+	rf.currentRole = Candidate
 	rf.votedFor = rf.me
+	rf.electionResetEvent = time.Now()
 	rf.persist()
 	rf.dLog("electionResetEvent in startElection")
 	rf.dLog("becomes Candidate (currentTerm=%d); logEntries=%v", rf.currentTerm, rf.logEntries)
@@ -537,16 +537,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.newApplyReadyCh = make(chan struct{}, 16)
 	rf.triggerAECh = make(chan struct{}, 1)
-	rf.currentRole = Follower
+
+	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.commitIndex = -1
-	rf.lastApplied = -1
-	rf.nextIndex = make(map[int]int)
-	rf.matchIndex = make(map[int]int)
 	rf.logEntries = []LogEntry{{
 		Command: byte(1),
 		Term:    0,
 	}}
+	rf.commitIndex = -1
+	rf.currentRole = Follower
+	rf.lastApplied = -1
+	rf.nextIndex = make(map[int]int)
+	rf.matchIndex = make(map[int]int)
 
 	atomic.StoreInt32(&rf.dead, 0)
 
