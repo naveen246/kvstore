@@ -45,7 +45,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	reply.Success = false
 	if args.Term == rf.currentTerm {
-		if args.LeaderId != rf.me && rf.state != Follower {
+		if args.LeaderId != rf.me && rf.currentRole != Follower {
 			rf.becomeFollower(args.Term)
 		}
 		rf.electionResetEvent = time.Now()
@@ -191,8 +191,8 @@ func (rf *Raft) onAppendEntriesReply(peerId int, reply AppendEntriesReply, saved
 		return
 	}
 
-	rf.dLog("state: %v, reply.term: %v", Leader.String(), reply.Term)
-	if rf.state == Leader && savedCurrentTerm == reply.Term {
+	rf.dLog("currentRole: %v, reply.term: %v", Leader.String(), reply.Term)
+	if rf.currentRole == Leader && savedCurrentTerm == reply.Term {
 		if reply.Success {
 			rf.onAppendEntriesReplySuccess(peerId, entries, ni)
 		} else {

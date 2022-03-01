@@ -132,7 +132,7 @@ type Raft struct {
 	logEntries  []LogEntry
 
 	// Volatile raft state on all servers
-	// index at which last commit has happened.
+	// index of highest log entry known to be committed
 	// commitIndex on leader is set to max logIndex at which LogEntry matches the majority of peers
 	// commitIndex on follower is set to min(leaderCommitIndex, logLength-1)
 	commitIndex int
@@ -141,13 +141,13 @@ type Raft struct {
 	lastApplied int
 
 	// state can be Follower, Candidate or Leader
-	state              NodeState
+	currentRole        NodeState
 	electionResetEvent time.Time
 
 	// Volatile raft state on leaders
-	// nextIndex[peerId] is the log index at which the next LogEntry is appended
+	// nextIndex[peerId] for each server, index of the next log entry to send to that server
 	nextIndex map[int]int
-	// matchIndex[peerId] is the log index at which the LogEntry matches that of leader
+	// matchIndex[peerId] for each server, index of highest log entry known to be replicated on server
 	matchIndex map[int]int
 }
 
@@ -184,7 +184,7 @@ func (rf *Raft) GetState() (int, bool) {
 	var isLeader bool
 	rf.lockMutex()
 	term = rf.currentTerm
-	isLeader = rf.state == Leader
+	isLeader = rf.currentRole == Leader
 	rf.unlockMutex()
 
 	return term, isLeader
@@ -279,7 +279,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 	rf.lockMutex()
-	if rf.state == Leader && !rf.killed() {
+	if rf.currentRole == Leader && !rf.killed() {
 		rf.dLog("Start agreement on next command: %v\t logEntries: %v at node %v", command, rf.logEntries, rf.me)
 		rf.logEntries = append(rf.logEntries, LogEntry{
 			Command: command,
@@ -349,8 +349,8 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should be started
 		<-electionTicker.C
 		rf.lockMutex()
-		if rf.state != Candidate && rf.state != Follower {
-			rf.dLog("in election timer state=%s, bailing out", rf.state)
+		if rf.currentRole != Candidate && rf.currentRole != Follower {
+			rf.dLog("in election timer currentRole=%s, bailing out", rf.currentRole)
 			rf.unlockMutex()
 			return
 		}
@@ -376,8 +376,8 @@ func (rf *Raft) ticker() {
 
 // Expects rf.mu to be locked.
 func (rf *Raft) becomeCandidate() int {
-	rf.dLog("startElection current state: %v", rf.state)
-	rf.state = Candidate
+	rf.dLog("startElection currentRole: %v", rf.currentRole)
+	rf.currentRole = Candidate
 	rf.currentTerm += 1
 	rf.electionResetEvent = time.Now()
 	rf.votedFor = rf.me
@@ -390,7 +390,7 @@ func (rf *Raft) becomeCandidate() int {
 // becomeFollower makes raft node a follower and resets its state.
 // Expects rf.mu to be locked.
 func (rf *Raft) becomeFollower(term int) {
-	rf.state = Follower
+	rf.currentRole = Follower
 	rf.dLog("becomes Follower with term=%d; logEntries=%v", term, rf.logEntries)
 	rf.currentTerm = term
 	rf.votedFor = -1
@@ -402,7 +402,7 @@ func (rf *Raft) becomeFollower(term int) {
 
 // Expects rf.mu to be locked.
 func (rf *Raft) becomeLeader() {
-	rf.state = Leader
+	rf.currentRole = Leader
 
 	for peerId := range rf.peers {
 		rf.nextIndex[peerId] = rf.logLength()
@@ -452,7 +452,7 @@ func (rf *Raft) startLeader() {
 			if doSend {
 				rf.dLog("doSend AppendEntries from leader to peers")
 				rf.lockMutex()
-				if rf.state != Leader {
+				if rf.currentRole != Leader {
 					rf.unlockMutex()
 					return
 				}
@@ -537,7 +537,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.newApplyReadyCh = make(chan struct{}, 16)
 	rf.triggerAECh = make(chan struct{}, 1)
-	rf.state = Follower
+	rf.currentRole = Follower
 	rf.votedFor = -1
 	rf.commitIndex = -1
 	rf.lastApplied = -1

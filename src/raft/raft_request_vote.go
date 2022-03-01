@@ -135,8 +135,8 @@ func (rf *Raft) getRequestVoteArgs(savedCurrentTerm int) RequestVoteArgs {
 func (rf *Raft) onRequestVoteReply(reply RequestVoteReply, candidateCurrentTerm int, votesReceived *int) {
 	rf.lockMutex()
 	defer rf.unlockMutex()
-	if rf.state != Candidate {
-		rf.dLog("while waiting for reply, state = %v", rf.state)
+	if rf.currentRole != Candidate {
+		rf.dLog("while waiting for reply, currentRole = %v", rf.currentRole)
 		return
 	}
 
