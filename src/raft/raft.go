@@ -575,9 +575,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		}
 		rf.unlockMutex()
 		rf.snapshotToPeers(args, savedCurrentTerm)
-	} else {
-		rf.unlockMutex()
+		return
 	}
+	rf.unlockMutex()
 }
 
 //
