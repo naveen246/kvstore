@@ -295,6 +295,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = rf.logLength() - 1
 		term = rf.currentTerm
 		isLeader = true
+		rf.matchIndex[rf.me] = index
 		rf.unlockMutex()
 		rf.dLog("Start agreement: Send to triggerAECh channel")
 		rf.triggerAECh <- struct{}{}

@@ -38,21 +38,19 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	rf.dLog("AppendEntries: %+v", args)
 	rf.dLog("AppendEntries(): time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
 
-	if args.Term > rf.currentTerm {
+	if args.Term > rf.currentTerm || (args.Term == rf.currentTerm && rf.currentRole == Candidate) {
 		rf.dLog("... term out of date in AppendEntries")
 		rf.becomeFollower(args.Term)
 	}
 
 	reply.Success = false
 	if args.Term == rf.currentTerm {
-		if args.LeaderId != rf.me && rf.currentRole != Follower {
-			rf.becomeFollower(args.Term)
-		}
 		rf.electionResetEvent = time.Now()
 		rf.dLog("electionResetEvent in AppendEntries")
 		// check if our logEntries contain an entry at PrevLogIndex whose term matches PrevLogTerm
-		if args.PrevLogIndex == -1 ||
-			(args.PrevLogIndex < rf.logLength() && args.PrevLogTerm == rf.logEntryAtIndex(args.PrevLogIndex).Term) {
+		logOk := rf.logLength() > args.PrevLogIndex &&
+			(args.PrevLogIndex == -1 || args.PrevLogTerm == rf.logEntryAtIndex(args.PrevLogIndex).Term)
+		if logOk {
 			rf.updateLog(args, reply)
 		} else {
 			rf.updateConflictIndex(args, reply)
@@ -136,30 +134,42 @@ func intMin(a, b int) int {
 func (rf *Raft) leaderSendAEs() {
 	rf.lockMutex()
 	savedCurrentTerm := rf.currentTerm
+	isLeader := rf.currentRole == Leader
 	rf.unlockMutex()
 
-	for peerId := range rf.peers {
-		go func(peerId int) {
-			rf.dLog("Created goroutine from leaderSendAEs for peerId:%d\n", peerId)
-			rf.lockMutex()
-			ni := rf.nextIndex[peerId]
-			entries := rf.logEntriesBetween(ni, rf.logLength())
-			rf.dLog("reading nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
-			args := rf.getAppendEntriesArgs(ni, savedCurrentTerm, entries)
-			rf.unlockMutex()
+	if !isLeader || rf.killed() {
+		return
+	}
 
-			rf.dLog("sending AppendEntries to %v: ni=%d, args=%v", peerId, ni, args)
-			var reply AppendEntriesReply
-			if len(entries) > 0 {
-				rf.dLog("Calling rf.sendAppendEntries with %d entries: %v", len(entries), entries)
-			}
-			ok := rf.sendAppendEntries(peerId, args, &reply)
-			if ok {
-				rf.onAppendEntriesReply(peerId, reply, savedCurrentTerm, entries, ni)
-			} else {
-				rf.dLog("sendAppendEntries failed")
-			}
+	for peerId := range rf.peers {
+		if peerId == rf.me {
+			continue
+		}
+		go func(peerId int) {
+			rf.replicateLog(peerId, savedCurrentTerm)
 		}(peerId)
+	}
+}
+
+func (rf *Raft) replicateLog(peerId int, savedCurrentTerm int) {
+	rf.dLog("Created goroutine from leaderSendAEs for peerId:%d\n", peerId)
+	rf.lockMutex()
+	ni := rf.nextIndex[peerId]
+	entries := rf.logEntriesBetween(ni, rf.logLength())
+	rf.dLog("reading nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
+	args := rf.getAppendEntriesArgs(ni, savedCurrentTerm, entries)
+	rf.unlockMutex()
+
+	rf.dLog("sending AppendEntries to %v: ni=%d, args=%v", peerId, ni, args)
+	var reply AppendEntriesReply
+	if len(entries) > 0 {
+		rf.dLog("Calling rf.sendAppendEntries with %d entries: %v", len(entries), entries)
+	}
+	ok := rf.sendAppendEntries(peerId, args, &reply)
+	if ok {
+		rf.onAppendEntriesReply(peerId, reply, savedCurrentTerm, entries, ni)
+	} else {
+		rf.dLog("sendAppendEntries failed")
 	}
 }
 
