@@ -130,19 +130,14 @@ func (rf *Raft) getRequestVoteArgs(savedCurrentTerm int) RequestVoteArgs {
 func (rf *Raft) onRequestVoteReply(reply RequestVoteReply, candidateCurrentTerm int, votesReceived *int) {
 	rf.lockMutex()
 	defer rf.unlockMutex()
-	if rf.currentRole != Candidate {
-		rf.dLog("while waiting for reply, currentRole = %v", rf.currentRole)
-		return
-	}
-
-	if reply.Term > candidateCurrentTerm {
-		rf.dLog("term out of date in RequestVoteReply")
-		rf.becomeFollower(reply.Term)
-	} else if reply.Term == candidateCurrentTerm && reply.VoteGranted {
+	if rf.currentRole == Candidate && reply.Term == candidateCurrentTerm && reply.VoteGranted {
 		*votesReceived += 1
 		if *votesReceived*2 >= len(rf.peers)+1 {
 			rf.dLog("wins election with %d votes", *votesReceived)
 			rf.startLeader()
 		}
+	} else if reply.Term > candidateCurrentTerm {
+		rf.dLog("term out of date in RequestVoteReply")
+		rf.becomeFollower(reply.Term)
 	}
 }

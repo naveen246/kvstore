@@ -242,6 +242,7 @@ func (rf *Raft) onAppendEntriesReplySuccess(peerId int, entries []LogEntry, ni i
 			}
 		}
 	}
+	rf.persist()
 	rf.dLog("AppendEntries reply from %d success: nextIndex := %v, matchIndex := %v; commitIndex := %d", peerId, rf.nextIndex, rf.matchIndex, rf.commitIndex)
 	if rf.commitIndex != savedCommitIndex {
 		rf.dLog("leader sets commitIndex := %d", rf.commitIndex)

@@ -36,7 +36,7 @@ import (
 	"6.824/labrpc"
 )
 
-const DebugMode = true
+const DebugMode = false
 
 const (
 	ElectionTimeout  = 300 * time.Millisecond
@@ -131,12 +131,12 @@ type Raft struct {
 	votedFor    int
 	logEntries  []LogEntry
 
-	// Volatile raft state on all servers
 	// index of highest log entry known to be committed
 	// commitIndex on leader is set to max logIndex at which LogEntry matches the majority of peers
 	// commitIndex on follower is set to min(leaderCommitIndex, logLength-1)
 	commitIndex int
 
+	// Volatile raft state on all servers
 	// lastApplied is the index of last logEntry that has been sent on applyCh channel back to client.
 	lastApplied int
 
@@ -206,6 +206,8 @@ func (rf *Raft) persist() {
 	logFatal(err)
 	err = e.Encode(rf.logEntries)
 	logFatal(err)
+	err = e.Encode(rf.commitIndex)
+	logFatal(err)
 
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
@@ -226,14 +228,17 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var log []LogEntry
+	var commitIndex int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil {
+		d.Decode(&log) != nil ||
+		d.Decode(&commitIndex) != nil {
 		logFatal(errors.New("error while decoding persisted data"))
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.logEntries = log
+		rf.commitIndex = commitIndex
 	}
 }
 
@@ -438,7 +443,7 @@ func (rf *Raft) startLeader() {
 					doSend = true
 					rf.dLog("heartbeat: read on triggerAECh")
 				} else {
-					rf.dLog("heartbeat: return")
+					rf.dLog("heartbeat: triggerAECh closed, return")
 					return
 				}
 
