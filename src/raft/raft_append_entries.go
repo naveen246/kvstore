@@ -151,13 +151,13 @@ func (rf *Raft) leaderSendAEs() {
 	}
 }
 
-func (rf *Raft) replicateLog(peerId int, savedCurrentTerm int) {
+func (rf *Raft) replicateLog(peerId int, leaderCurrentTerm int) {
 	rf.dLog("Created goroutine from leaderSendAEs for peerId:%d\n", peerId)
 	rf.lockMutex()
 	ni := rf.nextIndex[peerId]
 	entries := rf.logEntriesBetween(ni, rf.logLength())
 	rf.dLog("reading nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
-	args := rf.getAppendEntriesArgs(ni, savedCurrentTerm, entries)
+	args := rf.getAppendEntriesArgs(ni, leaderCurrentTerm, entries)
 	rf.unlockMutex()
 
 	rf.dLog("sending AppendEntries to %v: ni=%d, args=%v", peerId, ni, args)
@@ -167,7 +167,7 @@ func (rf *Raft) replicateLog(peerId int, savedCurrentTerm int) {
 	}
 	ok := rf.sendAppendEntries(peerId, args, &reply)
 	if ok {
-		rf.onAppendEntriesReply(peerId, reply, savedCurrentTerm)
+		rf.onAppendEntriesReply(peerId, reply, leaderCurrentTerm)
 	} else {
 		rf.dLog("sendAppendEntries failed")
 	}
