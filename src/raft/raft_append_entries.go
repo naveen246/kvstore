@@ -237,18 +237,19 @@ func (rf *Raft) onAppendEntriesReplySuccess(peerId int, reply AppendEntriesReply
 		rf.matchIndex[peerId] = reply.AckMatchIndex
 	} else {
 		rf.nextIndex[peerId] -= 1
+		return
 	}
 
 	savedCommitIndex := rf.commitIndex
 	for i := rf.commitIndex + 1; i < rf.logLength(); i++ {
 		if rf.logEntryAtIndex(i).Term == rf.currentTerm {
-			matchCount := 1
+			matchCount := 0
 			for peerId := range rf.peers {
 				if rf.matchIndex[peerId] >= i {
 					matchCount++
 				}
 			}
-			if matchCount*2 > len(rf.peers)+1 {
+			if matchCount*2 >= len(rf.peers)+1 {
 				rf.commitIndex = i
 			}
 		}
