@@ -14,8 +14,9 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term    int
-	Success bool
+	Term          int
+	Success       bool
+	AckMatchIndex int
 
 	ConflictIndex int
 	ConflictTerm  int
@@ -43,18 +44,19 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		rf.becomeFollower(args.Term)
 	}
 
-	reply.Success = false
-	if args.Term == rf.currentTerm {
+	// check if our logEntries contain an entry at PrevLogIndex whose term matches PrevLogTerm
+	logOk := rf.logLength() > args.PrevLogIndex &&
+		(args.PrevLogIndex == -1 || args.PrevLogTerm == rf.logEntryAtIndex(args.PrevLogIndex).Term)
+	if args.Term == rf.currentTerm && logOk {
 		rf.electionResetEvent = time.Now()
 		rf.dLog("electionResetEvent in AppendEntries")
-		// check if our logEntries contain an entry at PrevLogIndex whose term matches PrevLogTerm
-		logOk := rf.logLength() > args.PrevLogIndex &&
-			(args.PrevLogIndex == -1 || args.PrevLogTerm == rf.logEntryAtIndex(args.PrevLogIndex).Term)
-		if logOk {
-			rf.updateLog(args, reply)
-		} else {
-			rf.updateConflictIndex(args, reply)
-		}
+		rf.updateLog(args)
+		reply.Success = true
+		reply.AckMatchIndex = args.PrevLogIndex + len(args.Entries)
+	} else {
+		rf.updateConflictIndex(args, reply)
+		reply.Success = false
+		reply.AckMatchIndex = -1
 	}
 
 	reply.Term = rf.currentTerm
@@ -63,9 +65,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	rf.dLog("time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
 }
 
-func (rf *Raft) updateLog(args AppendEntriesArgs, reply *AppendEntriesReply) {
-	reply.Success = true
-
+func (rf *Raft) updateLog(args AppendEntriesArgs) {
 	// Find an insertion point - where there's a term mismatch between
 	// the existing logEntries starting at PrevLogIndex+1 and the new entries sent
 	// in the RPC.
@@ -167,7 +167,7 @@ func (rf *Raft) replicateLog(peerId int, savedCurrentTerm int) {
 	}
 	ok := rf.sendAppendEntries(peerId, args, &reply)
 	if ok {
-		rf.onAppendEntriesReply(peerId, reply, savedCurrentTerm, entries, ni)
+		rf.onAppendEntriesReply(peerId, reply, savedCurrentTerm)
 	} else {
 		rf.dLog("sendAppendEntries failed")
 	}
@@ -192,7 +192,7 @@ func (rf *Raft) getAppendEntriesArgs(ni int, savedCurrentTerm int, entries []Log
 	return args
 }
 
-func (rf *Raft) onAppendEntriesReply(peerId int, reply AppendEntriesReply, savedCurrentTerm int, entries []LogEntry, ni int) {
+func (rf *Raft) onAppendEntriesReply(peerId int, reply AppendEntriesReply, savedCurrentTerm int) {
 	rf.lockMutex()
 	defer rf.unlockMutex()
 	if reply.Term > savedCurrentTerm {
@@ -202,16 +202,16 @@ func (rf *Raft) onAppendEntriesReply(peerId int, reply AppendEntriesReply, saved
 	}
 
 	rf.dLog("currentRole: %v, reply.term: %v", Leader.String(), reply.Term)
-	if rf.currentRole == Leader && savedCurrentTerm == reply.Term {
+	if reply.Term == savedCurrentTerm && rf.currentRole == Leader {
 		if reply.Success {
-			rf.onAppendEntriesReplySuccess(peerId, entries, ni)
+			rf.onAppendEntriesReplySuccess(peerId, reply)
 		} else {
-			rf.onAppendEntriesReplyFailure(peerId, reply, ni)
+			rf.onAppendEntriesReplyFailure(peerId, reply)
 		}
 	}
 }
 
-func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply, ni int) {
+func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply) {
 	if reply.ConflictTerm >= 0 {
 		lastIndexOfTerm := -1
 		for i := rf.logLength() - 1; i >= 0; i-- {
@@ -228,14 +228,15 @@ func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply
 	} else {
 		rf.nextIndex[peerId] = reply.ConflictIndex
 	}
-	rf.dLog("AppendEntries reply from %d not success: nextIndex := %d", peerId, ni-1)
 }
 
-func (rf *Raft) onAppendEntriesReplySuccess(peerId int, entries []LogEntry, ni int) {
-	if ni+len(entries) > rf.nextIndex[peerId] {
-		rf.nextIndex[peerId] = ni + len(entries)
+func (rf *Raft) onAppendEntriesReplySuccess(peerId int, reply AppendEntriesReply) {
+	if reply.AckMatchIndex >= rf.matchIndex[peerId] {
+		rf.nextIndex[peerId] = reply.AckMatchIndex + 1
 		rf.dLog("On AE reply success nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
-		rf.matchIndex[peerId] = rf.nextIndex[peerId] - 1
+		rf.matchIndex[peerId] = reply.AckMatchIndex
+	} else {
+		rf.nextIndex[peerId] -= 1
 	}
 
 	savedCommitIndex := rf.commitIndex

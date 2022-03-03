@@ -131,7 +131,7 @@ type Raft struct {
 	votedFor    int
 	logEntries  []LogEntry
 
-	// index of highest log entry known to be committed
+	// index of the highest log entry known to be committed
 	// commitIndex on leader is set to max logIndex at which LogEntry matches the majority of peers
 	// commitIndex on follower is set to min(leaderCommitIndex, logLength-1)
 	commitIndex int
@@ -147,7 +147,7 @@ type Raft struct {
 	// Volatile raft state on leaders
 	// nextIndex[peerId] for each server, index of the next log entry to send to that server
 	nextIndex map[int]int
-	// matchIndex[peerId] for each server, index of highest log entry known to be replicated on server
+	// matchIndex[peerId] for each server, index of the highest log entry known to be replicated on server
 	matchIndex map[int]int
 }
 
@@ -227,17 +227,17 @@ func (rf *Raft) readPersist(data []byte) {
 	d := labgob.NewDecoder(r)
 	var currentTerm int
 	var votedFor int
-	var log []LogEntry
+	var logEntries []LogEntry
 	var commitIndex int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil ||
+		d.Decode(&logEntries) != nil ||
 		d.Decode(&commitIndex) != nil {
 		logFatal(errors.New("error while decoding persisted data"))
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
-		rf.logEntries = log
+		rf.logEntries = logEntries
 		rf.commitIndex = commitIndex
 	}
 }
