@@ -463,8 +463,9 @@ func (rf *Raft) startLeader() {
 					return
 				}
 				rf.dLog("Call leaderSendAEs inside heartbeat: time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
+				currentTerm := rf.currentTerm
 				rf.unlockMutex()
-				rf.leaderSendAEs()
+				rf.leaderSendAEs(currentTerm)
 			}
 		}
 	}(HeartBeatTimeout)
