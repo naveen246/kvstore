@@ -210,6 +210,9 @@ func (rf *Raft) onAppendEntriesReply(peerId int, reply AppendEntriesReply, saved
 }
 
 func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply) {
+	if rf.killed() {
+		return
+	}
 	rf.lockMutex()
 	defer rf.unlockMutex()
 	if reply.ConflictTerm >= 0 {
@@ -231,6 +234,9 @@ func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply
 }
 
 func (rf *Raft) onAppendEntriesReplySuccess(peerId int, reply AppendEntriesReply) {
+	if rf.killed() {
+		return
+	}
 	rf.lockMutex()
 	if reply.AckMatchIndex >= rf.matchIndex[peerId] {
 		rf.nextIndex[peerId] = reply.AckMatchIndex + 1
@@ -257,16 +263,18 @@ func (rf *Raft) onAppendEntriesReplySuccess(peerId int, reply AppendEntriesReply
 		}
 	}
 	rf.persist()
-	commitIndex := rf.commitIndex
 	rf.dLog("AppendEntries reply from %d success: nextIndex := %v, matchIndex := %v; commitIndex := %d", peerId, rf.nextIndex, rf.matchIndex, rf.commitIndex)
-	rf.unlockMutex()
-	if commitIndex != savedCommitIndex {
-		rf.dLog("leader sets commitIndex := %d", commitIndex)
+
+	if rf.commitIndex != savedCommitIndex {
+		rf.dLog("leader sets commitIndex := %d", rf.commitIndex)
 		// Commit index changed: the leader considers new entries to be
 		// committed. Send new entries on the commit channel to this
 		// leader's clients, and notify followers by sending them AEs.
 		rf.newApplyReadyCh <- struct{}{}
+		rf.unlockMutex()
 		rf.triggerAECh <- struct{}{}
 		rf.dLog("Sent to triggerAECh channel")
+		return
 	}
+	rf.unlockMutex()
 }
