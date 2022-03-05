@@ -1,5 +1,7 @@
 package raft
 
+import "time"
+
 //
 // RequestVoteArgs : RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -70,20 +72,25 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	lastLogIndex, lastLogTerm := rf.lastLogIndexAndTerm()
 	rf.dLog("RequestVote: %+v [currentTerm=%d, votedFor=%d, logEntries index/term=(%d, %d)]", args, rf.currentTerm, rf.votedFor, lastLogIndex, lastLogTerm)
 
+	if args.Term > rf.currentTerm {
+		rf.becomeFollower(args.Term)
+	}
+
 	logOk := args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)
 	notVotedForOthers := rf.votedFor == -1 || rf.votedFor == args.CandidateId
-	termOk := args.Term > rf.currentTerm || (args.Term == rf.currentTerm && notVotedForOthers)
+	termOk := args.Term == rf.currentTerm && notVotedForOthers
 
 	if logOk && termOk {
-		rf.becomeFollower(args.Term)
+		rf.currentRole = Follower
+		rf.electionResetEvent = time.Now()
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 		rf.dLog("electionResetEvent in RequestVote")
 	} else {
 		reply.VoteGranted = false
 	}
-	reply.Term = rf.currentTerm
 	rf.persist()
+	reply.Term = rf.currentTerm
 	rf.dLog("... RequestVote reply: %+v", reply)
 }
 
