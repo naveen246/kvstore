@@ -193,6 +193,9 @@ func (rf *Raft) getAppendEntriesArgs(ni int, savedCurrentTerm int, entries []Log
 }
 
 func (rf *Raft) onAppendEntriesReply(peerId int, reply AppendEntriesReply, savedCurrentTerm int) {
+	if rf.killed() {
+		return
+	}
 	rf.lockMutex()
 	defer rf.unlockMutex()
 	if reply.Term > savedCurrentTerm {
@@ -261,11 +264,6 @@ func (rf *Raft) onAppendEntriesReplySuccess(peerId int, reply AppendEntriesReply
 		// Commit index changed: the leader considers new entries to be
 		// committed. Send new entries on the commit channel to this
 		// leader's clients, and notify followers by sending them AEs.
-		defer func() {
-			if r := recover(); r != nil {
-				rf.dLog("Recovered. Error: ", r)
-			}
-		}()
 		rf.newApplyReadyCh <- struct{}{}
 	loop:
 		for {
