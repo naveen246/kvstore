@@ -131,23 +131,23 @@ type Raft struct {
 	votedFor    int
 	logEntries  []LogEntry
 
-	// Volatile raft state on all servers
-	// index of highest log entry known to be committed
+	// index of the highest log entry known to be committed
 	// commitIndex on leader is set to max logIndex at which LogEntry matches the majority of peers
 	// commitIndex on follower is set to min(leaderCommitIndex, logLength-1)
 	commitIndex int
 
+	// Volatile raft state on all servers
 	// lastApplied is the index of last logEntry that has been sent on applyCh channel back to client.
 	lastApplied int
 
-	// state can be Follower, Candidate or Leader
+	// currentRole can be Follower, Candidate or Leader
 	currentRole        NodeState
 	electionResetEvent time.Time
 
 	// Volatile raft state on leaders
 	// nextIndex[peerId] for each server, index of the next log entry to send to that server
 	nextIndex map[int]int
-	// matchIndex[peerId] for each server, index of highest log entry known to be replicated on server
+	// matchIndex[peerId] for each server, index of the highest log entry known to be replicated on server
 	matchIndex map[int]int
 }
 
@@ -206,6 +206,8 @@ func (rf *Raft) persist() {
 	logFatal(err)
 	err = e.Encode(rf.logEntries)
 	logFatal(err)
+	err = e.Encode(rf.commitIndex)
+	logFatal(err)
 
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
@@ -225,15 +227,18 @@ func (rf *Raft) readPersist(data []byte) {
 	d := labgob.NewDecoder(r)
 	var currentTerm int
 	var votedFor int
-	var log []LogEntry
+	var logEntries []LogEntry
+	var commitIndex int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
-		d.Decode(&log) != nil {
+		d.Decode(&logEntries) != nil ||
+		d.Decode(&commitIndex) != nil {
 		logFatal(errors.New("error while decoding persisted data"))
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
-		rf.logEntries = log
+		rf.logEntries = logEntries
+		rf.commitIndex = commitIndex
 	}
 }
 
@@ -290,6 +295,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = rf.logLength() - 1
 		term = rf.currentTerm
 		isLeader = true
+		rf.matchIndex[rf.me] = index
 		rf.unlockMutex()
 		rf.dLog("Start agreement: Send to triggerAECh channel")
 		rf.triggerAECh <- struct{}{}
@@ -377,10 +383,10 @@ func (rf *Raft) ticker() {
 // Expects rf.mu to be locked.
 func (rf *Raft) becomeCandidate() int {
 	rf.dLog("startElection currentRole: %v", rf.currentRole)
-	rf.currentRole = Candidate
 	rf.currentTerm += 1
-	rf.electionResetEvent = time.Now()
+	rf.currentRole = Candidate
 	rf.votedFor = rf.me
+	rf.electionResetEvent = time.Now()
 	rf.persist()
 	rf.dLog("electionResetEvent in startElection")
 	rf.dLog("becomes Candidate (currentTerm=%d); logEntries=%v", rf.currentTerm, rf.logEntries)
@@ -438,7 +444,7 @@ func (rf *Raft) startLeader() {
 					doSend = true
 					rf.dLog("heartbeat: read on triggerAECh")
 				} else {
-					rf.dLog("heartbeat: return")
+					rf.dLog("heartbeat: triggerAECh closed, return")
 					return
 				}
 
@@ -449,6 +455,10 @@ func (rf *Raft) startLeader() {
 				t.Reset(heartbeatTimeout)
 			}
 
+			if rf.killed() {
+				return
+			}
+
 			if doSend {
 				rf.dLog("doSend AppendEntries from leader to peers")
 				rf.lockMutex()
@@ -457,8 +467,9 @@ func (rf *Raft) startLeader() {
 					return
 				}
 				rf.dLog("Call leaderSendAEs inside heartbeat: time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
+				currentTerm := rf.currentTerm
 				rf.unlockMutex()
-				rf.leaderSendAEs()
+				rf.leaderSendAEs(currentTerm)
 			}
 		}
 	}(HeartBeatTimeout)
@@ -537,16 +548,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.newApplyReadyCh = make(chan struct{}, 16)
 	rf.triggerAECh = make(chan struct{}, 1)
-	rf.currentRole = Follower
+
+	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.commitIndex = -1
-	rf.lastApplied = -1
-	rf.nextIndex = make(map[int]int)
-	rf.matchIndex = make(map[int]int)
 	rf.logEntries = []LogEntry{{
 		Command: byte(1),
 		Term:    0,
 	}}
+	rf.commitIndex = -1
+	rf.currentRole = Follower
+	rf.lastApplied = -1
+	rf.nextIndex = make(map[int]int)
+	rf.matchIndex = make(map[int]int)
 
 	atomic.StoreInt32(&rf.dead, 0)
 

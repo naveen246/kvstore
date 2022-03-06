@@ -73,23 +73,24 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.dLog("RequestVote: %+v [currentTerm=%d, votedFor=%d, logEntries index/term=(%d, %d)]", args, rf.currentTerm, rf.votedFor, lastLogIndex, lastLogTerm)
 
 	if args.Term > rf.currentTerm {
-		rf.dLog("... term out of date in RequestVote")
 		rf.becomeFollower(args.Term)
 	}
 
 	logOk := args.LastLogTerm > lastLogTerm || (args.LastLogTerm == lastLogTerm && args.LastLogIndex >= lastLogIndex)
-	termOk := args.Term == rf.currentTerm && (rf.votedFor == -1 || rf.votedFor == args.CandidateId)
+	notVotedForOthers := rf.votedFor == -1 || rf.votedFor == args.CandidateId
+	termOk := args.Term == rf.currentTerm && notVotedForOthers
 
 	if logOk && termOk {
-		reply.VoteGranted = true
-		rf.votedFor = args.CandidateId
+		rf.currentRole = Follower
 		rf.electionResetEvent = time.Now()
+		rf.votedFor = args.CandidateId
+		reply.VoteGranted = true
 		rf.dLog("electionResetEvent in RequestVote")
 	} else {
 		reply.VoteGranted = false
 	}
-	reply.Term = rf.currentTerm
 	rf.persist()
+	reply.Term = rf.currentTerm
 	rf.dLog("... RequestVote reply: %+v", reply)
 }
 
@@ -98,11 +99,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) startElection() {
 	candidateCurrentTerm := rf.becomeCandidate()
 	votesReceived := 1
+	args := rf.getRequestVoteArgs(candidateCurrentTerm)
 
 	// Send RequestVote RPCs to all other servers concurrently.
 	for id := range rf.peers {
+		if id == rf.me {
+			continue
+		}
 		go func(peerId int, votesReceived *int) {
-			args := rf.getRequestVoteArgs(candidateCurrentTerm)
 			rf.dLog("sending RequestVote to %d: %+v", peerId, args)
 			var reply RequestVoteReply
 			ok := rf.sendRequestVote(peerId, &args, &reply)
@@ -119,15 +123,13 @@ func (rf *Raft) startElection() {
 }
 
 func (rf *Raft) getRequestVoteArgs(savedCurrentTerm int) RequestVoteArgs {
-	rf.lockMutex()
-	defer rf.unlockMutex()
-	savedLastLogIndex, savedLastLogTerm := rf.lastLogIndexAndTerm()
+	lastLogIndex, lastLogTerm := rf.lastLogIndexAndTerm()
 
 	args := RequestVoteArgs{
 		Term:         savedCurrentTerm,
 		CandidateId:  rf.me,
-		LastLogIndex: savedLastLogIndex,
-		LastLogTerm:  savedLastLogTerm,
+		LastLogIndex: lastLogIndex,
+		LastLogTerm:  lastLogTerm,
 	}
 	return args
 }
@@ -135,19 +137,14 @@ func (rf *Raft) getRequestVoteArgs(savedCurrentTerm int) RequestVoteArgs {
 func (rf *Raft) onRequestVoteReply(reply RequestVoteReply, candidateCurrentTerm int, votesReceived *int) {
 	rf.lockMutex()
 	defer rf.unlockMutex()
-	if rf.currentRole != Candidate {
-		rf.dLog("while waiting for reply, currentRole = %v", rf.currentRole)
-		return
-	}
-
-	if reply.Term > candidateCurrentTerm {
-		rf.dLog("term out of date in RequestVoteReply")
-		rf.becomeFollower(reply.Term)
-	} else if reply.Term == candidateCurrentTerm && reply.VoteGranted {
+	if rf.currentRole == Candidate && reply.Term == candidateCurrentTerm && reply.VoteGranted {
 		*votesReceived += 1
-		if *votesReceived*2 > len(rf.peers)+1 {
+		if *votesReceived*2 >= len(rf.peers)+1 {
 			rf.dLog("wins election with %d votes", *votesReceived)
 			rf.startLeader()
 		}
+	} else if reply.Term > candidateCurrentTerm {
+		rf.dLog("term out of date in RequestVoteReply")
+		rf.becomeFollower(reply.Term)
 	}
 }
