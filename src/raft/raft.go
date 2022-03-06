@@ -167,13 +167,13 @@ func (rf *Raft) lastLogIndexAndTerm() (int, int) {
 }
 
 func (rf *Raft) logEntryAtIndex(index int) LogEntry {
-	if index <= rf.snapshotIndex || len(rf.logEntries) <= index-(rf.snapshotIndex+1) {
+	if index <= rf.snapshotIndex || index >= rf.logLength() {
 		return LogEntry{
 			Command: nil,
-			Term:    0,
+			Term:    -1,
 		}
 	}
-	return rf.logEntries[index-(rf.snapshotIndex+1)]
+	return rf.logEntries[index-rf.snapShotLength()]
 }
 
 // logEntriesBetween returns slice starting at and including startIndex upto and excluding endIndex
@@ -181,8 +181,8 @@ func (rf *Raft) logEntriesBetween(startIndex int, endIndex int) []LogEntry {
 	if endIndex <= startIndex || len(rf.logEntries) == 0 {
 		return []LogEntry{}
 	}
-	startIndex = startIndex - (rf.snapshotIndex + 1)
-	endIndex = endIndex - (rf.snapshotIndex + 1)
+	startIndex = startIndex - rf.snapShotLength()
+	endIndex = endIndex - rf.snapShotLength()
 	if startIndex < 0 {
 		startIndex = 0
 	}
@@ -193,7 +193,11 @@ func (rf *Raft) logEntriesBetween(startIndex int, endIndex int) []LogEntry {
 }
 
 func (rf *Raft) logLength() int {
-	return rf.snapshotIndex + 1 + len(rf.logEntries)
+	return rf.snapShotLength() + len(rf.logEntries)
+}
+
+func (rf *Raft) snapShotLength() int {
+	return rf.snapshotIndex + 1
 }
 
 // GetState : return currentTerm and whether this server
