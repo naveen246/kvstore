@@ -45,18 +45,21 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	}
 
 	// check if our logEntries contain an entry at PrevLogIndex whose term matches PrevLogTerm
-	logOk := rf.logLength() > args.PrevLogIndex &&
-		(args.PrevLogIndex == -1 || args.PrevLogTerm == rf.logEntryAtIndex(args.PrevLogIndex).Term)
-	if args.Term == rf.currentTerm && logOk {
+	reply.Success = false
+	if args.Term == rf.currentTerm {
 		rf.electionResetEvent = time.Now()
 		rf.dLog("electionResetEvent in AppendEntries")
-		rf.updateLog(args)
-		reply.Success = true
-		reply.AckMatchIndex = args.PrevLogIndex + len(args.Entries)
-	} else {
-		rf.updateConflictIndex(args, reply)
-		reply.Success = false
-		reply.AckMatchIndex = -1
+		logOk := rf.logLength() > args.PrevLogIndex &&
+			(args.PrevLogIndex == -1 || args.PrevLogTerm == rf.logEntryAtIndex(args.PrevLogIndex).Term)
+		if logOk {
+			rf.updateLog(args)
+			reply.Success = true
+			reply.AckMatchIndex = args.PrevLogIndex + len(args.Entries)
+		} else {
+			reply.ConflictIndex, reply.ConflictTerm = rf.conflictIndexAndTerm(args)
+			reply.Success = false
+			reply.AckMatchIndex = -1
+		}
 	}
 
 	reply.Term = rf.currentTerm
@@ -101,25 +104,26 @@ func (rf *Raft) updateLog(args AppendEntriesArgs) {
 	}
 }
 
-func (rf *Raft) updateConflictIndex(args AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) conflictIndexAndTerm(args AppendEntriesArgs) (int, int) {
 	// No match for PrevLogIndex/PrevLogTerm. Populate
 	// ConflictIndex/ConflictTerm to help the leader bring us up to date
 	// quickly.
+	var conflictIndex, conflictTerm int
 	if args.PrevLogIndex >= rf.logLength() {
-		reply.ConflictIndex = rf.logLength()
-		reply.ConflictTerm = -1
+		conflictIndex = rf.logLength()
+		conflictTerm = -1
 	} else {
 		// PrevLogIndex points within our logEntries, but PrevLogTerm doesn't match rf.logEntries[PrevLogIndex].
-		reply.ConflictTerm = rf.logEntryAtIndex(args.PrevLogIndex).Term
-
+		conflictTerm = rf.logEntryAtIndex(args.PrevLogIndex).Term
 		var i int
 		for i = args.PrevLogIndex - 1; i >= 0; i-- {
-			if rf.logEntryAtIndex(i).Term != reply.ConflictTerm {
+			if rf.logEntryAtIndex(i).Term != conflictTerm {
 				break
 			}
 		}
-		reply.ConflictIndex = i + 1
+		conflictIndex = i + 1
 	}
+	return conflictIndex, conflictTerm
 }
 
 func intMin(a, b int) int {
@@ -154,6 +158,9 @@ func (rf *Raft) replicateLog(peerId int, leaderCurrentTerm int) {
 	args := rf.getAppendEntriesArgs(ni, leaderCurrentTerm, entries)
 	rf.unlockMutex()
 
+	if rf.killed() {
+		return
+	}
 	rf.dLog("sending AppendEntries to %v: ni=%d, args=%v", peerId, ni, args)
 	var reply AppendEntriesReply
 	if len(entries) > 0 {

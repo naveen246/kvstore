@@ -455,6 +455,10 @@ func (rf *Raft) startLeader() {
 				t.Reset(heartbeatTimeout)
 			}
 
+			if rf.killed() {
+				return
+			}
+
 			if doSend {
 				rf.dLog("doSend AppendEntries from leader to peers")
 				rf.lockMutex()
