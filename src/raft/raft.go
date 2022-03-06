@@ -133,24 +133,24 @@ type Raft struct {
 	snapshotTerm  int
 	snapshotIndex int
 
-	// Volatile raft state on all servers
-	// index at which last commit has happened.
+	// index of the highest log entry known to be committed
 	// commitIndex on leader is set to max logIndex at which LogEntry matches the majority of peers
 	// commitIndex on follower is set to min(leaderCommitIndex, logLength-1)
 	commitIndex int
 
+	// Volatile raft state on all servers
 	// lastApplied is the index of last logEntry that has been sent on applyCh channel back to client.
 	lastApplied int
 
-	// state can be Follower, Candidate or Leader
-	state              NodeState
+	// currentRole can be Follower, Candidate or Leader
+	currentRole        NodeState
 	electionResetEvent time.Time
 	snapshot           []byte
 
 	// Volatile raft state on leaders
-	// nextIndex[peerId] is the log index at which the next LogEntry is appended
+	// nextIndex[peerId] for each server, index of the next log entry to send to that server
 	nextIndex map[int]int
-	// matchIndex[peerId] is the log index at which the LogEntry matches that of leader
+	// matchIndex[peerId] for each server, index of the highest log entry known to be replicated on server
 	matchIndex map[int]int
 }
 
@@ -204,7 +204,7 @@ func (rf *Raft) GetState() (int, bool) {
 	var isLeader bool
 	rf.lockMutex()
 	term = rf.currentTerm
-	isLeader = rf.state == Leader
+	isLeader = rf.currentRole == Leader
 	rf.unlockMutex()
 
 	return term, isLeader
@@ -225,6 +225,8 @@ func (rf *Raft) persist() {
 	err = e.Encode(rf.votedFor)
 	logFatal(err)
 	err = e.Encode(rf.logEntries)
+	logFatal(err)
+	err = e.Encode(rf.commitIndex)
 	logFatal(err)
 	err = e.Encode(rf.snapshotTerm)
 	logFatal(err)
@@ -250,11 +252,13 @@ func (rf *Raft) readPersist(data []byte, snapshot []byte) {
 	var currentTerm int
 	var votedFor int
 	var logEntries []LogEntry
+	var commitIndex int
 	var snapshotTerm int
 	var snapshotIndex int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&logEntries) != nil ||
+		d.Decode(&commitIndex) != nil ||
 		d.Decode(&snapshotTerm) != nil ||
 		d.Decode(&snapshotIndex) != nil {
 		logFatal(errors.New("error while decoding persisted data"))
@@ -262,6 +266,7 @@ func (rf *Raft) readPersist(data []byte, snapshot []byte) {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.logEntries = logEntries
+		rf.commitIndex = commitIndex
 		rf.snapshotTerm = snapshotTerm
 		rf.snapshotIndex = snapshotIndex
 	}
@@ -289,7 +294,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 	rf.lockMutex()
-	if rf.state == Leader && !rf.killed() {
+	if rf.currentRole == Leader && !rf.killed() {
 		rf.dLog("Start agreement on next command: %v\t logEntries: %v at node %v", command, rf.logEntries, rf.me)
 		rf.logEntries = append(rf.logEntries, LogEntry{
 			Command: command,
@@ -301,6 +306,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		index = rf.logLength() - 1
 		term = rf.currentTerm
 		isLeader = true
+		rf.matchIndex[rf.me] = index
 		rf.unlockMutex()
 		rf.dLog("Start agreement: Send to triggerAECh channel")
 		rf.triggerAECh <- struct{}{}
@@ -360,8 +366,8 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should be started
 		<-electionTicker.C
 		rf.lockMutex()
-		if rf.state != Candidate && rf.state != Follower {
-			rf.dLog("in election timer state=%s, bailing out", rf.state)
+		if rf.currentRole != Candidate && rf.currentRole != Follower {
+			rf.dLog("in election timer currentRole=%s, bailing out", rf.currentRole)
 			rf.unlockMutex()
 			return
 		}
@@ -387,11 +393,11 @@ func (rf *Raft) ticker() {
 
 // Expects rf.mu to be locked.
 func (rf *Raft) becomeCandidate() int {
-	rf.dLog("startElection current state: %v", rf.state)
-	rf.state = Candidate
+	rf.dLog("startElection currentRole: %v", rf.currentRole)
 	rf.currentTerm += 1
-	rf.electionResetEvent = time.Now()
+	rf.currentRole = Candidate
 	rf.votedFor = rf.me
+	rf.electionResetEvent = time.Now()
 	rf.persist()
 	rf.dLog("electionResetEvent in startElection")
 	rf.dLog("becomes Candidate (currentTerm=%d); logEntries=%v", rf.currentTerm, rf.logEntries)
@@ -401,7 +407,7 @@ func (rf *Raft) becomeCandidate() int {
 // becomeFollower makes raft node a follower and resets its state.
 // Expects rf.mu to be locked.
 func (rf *Raft) becomeFollower(term int) {
-	rf.state = Follower
+	rf.currentRole = Follower
 	rf.dLog("becomes Follower with term=%d; logEntries=%v", term, rf.logEntries)
 	rf.currentTerm = term
 	rf.votedFor = -1
@@ -413,7 +419,7 @@ func (rf *Raft) becomeFollower(term int) {
 
 // Expects rf.mu to be locked.
 func (rf *Raft) becomeLeader() {
-	rf.state = Leader
+	rf.currentRole = Leader
 
 	for peerId := range rf.peers {
 		rf.nextIndex[peerId] = rf.logLength()
@@ -449,7 +455,7 @@ func (rf *Raft) startLeader() {
 					doSend = true
 					rf.dLog("heartbeat: read on triggerAECh")
 				} else {
-					rf.dLog("heartbeat: return")
+					rf.dLog("heartbeat: triggerAECh closed, return")
 					return
 				}
 
@@ -460,16 +466,21 @@ func (rf *Raft) startLeader() {
 				t.Reset(heartbeatTimeout)
 			}
 
+			if rf.killed() {
+				return
+			}
+
 			if doSend {
 				rf.dLog("doSend AppendEntries from leader to peers")
 				rf.lockMutex()
-				if rf.state != Leader {
+				if rf.currentRole != Leader {
 					rf.unlockMutex()
 					return
 				}
 				rf.dLog("Call leaderSendAEs inside heartbeat: time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
+				currentTerm := rf.currentTerm
 				rf.unlockMutex()
-				rf.leaderSendAEs()
+				rf.leaderSendAEs(currentTerm)
 			}
 		}
 	}(HeartBeatTimeout)
@@ -565,7 +576,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.lockMutex()
 	savedCurrentTerm := rf.currentTerm
-	if rf.state == Leader && !rf.killed() {
+	if rf.currentRole == Leader && !rf.killed() {
 		args := InstallSnapshotArgs{
 			Term:              rf.currentTerm,
 			LeaderId:          rf.me,
@@ -600,16 +611,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.newApplyReadyCh = make(chan ApplyMsg, 16)
 	rf.triggerAECh = make(chan struct{}, 1)
-	rf.state = Follower
+
+	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.commitIndex = -1
-	rf.lastApplied = -1
-	rf.nextIndex = make(map[int]int)
-	rf.matchIndex = make(map[int]int)
 	rf.logEntries = []LogEntry{{
 		Command: byte(1),
 		Term:    0,
 	}}
+	rf.commitIndex = -1
+	rf.currentRole = Follower
+	rf.lastApplied = -1
+	rf.nextIndex = make(map[int]int)
+	rf.matchIndex = make(map[int]int)
 	rf.snapshotIndex = -1
 
 	atomic.StoreInt32(&rf.dead, 0)
