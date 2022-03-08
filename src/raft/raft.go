@@ -163,14 +163,20 @@ func (rf *Raft) lastLogIndexAndTerm() (int, int) {
 		lastTerm := rf.logEntryAtIndex(lastIndex).Term
 		return lastIndex, lastTerm
 	}
-	return -1, -1
+	return rf.snapshotIndex, rf.snapshotTerm
 }
 
 func (rf *Raft) logEntryAtIndex(index int) LogEntry {
-	if index <= rf.snapshotIndex || index >= rf.logLength() {
+	if index <= rf.snapshotIndex {
 		return LogEntry{
 			Command: nil,
-			Term:    -1,
+			Term:    rf.snapshotTerm,
+		}
+	} else if index >= rf.logLength() {
+		_, lastTerm := rf.lastLogIndexAndTerm()
+		return LogEntry{
+			Command: nil,
+			Term:    lastTerm,
 		}
 	}
 	return rf.logEntries[index-rf.snapShotLength()]
@@ -239,7 +245,7 @@ func (rf *Raft) persist() {
 
 	data := w.Bytes()
 	rf.persister.SaveStateAndSnapshot(data, rf.snapshot)
-	rf.dLog("persist(): time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
+	rf.dLog("persist(): time elapsed since electionResetEvent: %v", time.Since(rf.electionResetEvent))
 }
 
 //
@@ -304,7 +310,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Command: command,
 			Term:    rf.currentTerm,
 		})
-		rf.dLog("[%d] leader - logEntries after append: %v at node %v\n", rf.me, rf.logEntries, rf.me)
+		rf.dLog("leader - logEntries after append: %v at node %v\n", rf.logEntries, rf.me)
 		rf.persist()
 		rf.dLog("... logEntries=%v", rf.logEntries)
 		index = rf.logLength() - 1
@@ -481,7 +487,7 @@ func (rf *Raft) startLeader() {
 					rf.unlockMutex()
 					return
 				}
-				rf.dLog("Call leaderSendAEs inside heartbeat: time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
+				rf.dLog("Call leaderSendAEs inside heartbeat: time elapsed since electionResetEvent: %v", time.Since(rf.electionResetEvent))
 				currentTerm := rf.currentTerm
 				rf.unlockMutex()
 				rf.leaderSendAEs(currentTerm)
@@ -530,7 +536,7 @@ func (rf *Raft) applyChSender() {
 			rf.dLog("applyChSender entries=%v, savedLastApplied=%d", entries, savedLastApplied)
 
 			for i, entry := range entries {
-				rf.dLog("[%d] pushing to applyCh chan cmd: %v, CommandIndex: %d\n", rf.me, entry.Command, savedLastApplied+i+1)
+				rf.dLog("pushing to applyCh chan cmd: %v, CommandIndex: %d\n", entry.Command, savedLastApplied+i+1)
 				rf.applyCh <- ApplyMsg{
 					CommandValid:  true,
 					Command:       entry.Command,
@@ -552,7 +558,7 @@ func (rf *Raft) applyChSender() {
 			rf.applyCh <- ApplyMsg{
 				CommandValid:  false,
 				Command:       nil,
-				CommandIndex:  0,
+				CommandIndex:  -1,
 				SnapshotValid: true,
 				Snapshot:      snapshot,
 				SnapshotTerm:  snapshotTerm,
@@ -579,20 +585,21 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.lockMutex()
-	savedCurrentTerm := rf.currentTerm
-	if rf.currentRole == Leader && !rf.killed() {
+	currentTerm := rf.currentTerm
+	isLeader := rf.currentRole == Leader
+	term := rf.logEntryAtIndex(index).Term
+	rf.unlockMutex()
+	rf.dLog("rf.Snapshot index: %d, snapshot: %v, isLeader: %v", index, snapshot, isLeader)
+	if !rf.killed() {
 		args := InstallSnapshotArgs{
-			Term:              rf.currentTerm,
+			Term:              currentTerm,
 			LeaderId:          rf.me,
 			LastIncludedIndex: index,
-			LastIncludedTerm:  0,
+			LastIncludedTerm:  term,
 			Data:              snapshot,
 		}
-		rf.unlockMutex()
-		rf.snapshotToPeers(args, savedCurrentTerm)
-		return
+		go rf.snapshotToPeers(args, currentTerm)
 	}
-	rf.unlockMutex()
 }
 
 //

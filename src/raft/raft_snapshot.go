@@ -12,7 +12,7 @@ type InstallSnapshotArgs struct {
 	// and including this index
 	LastIncludedIndex int
 
-	// term of lastIncludedIndex
+	// term of LastIncludedIndex
 	LastIncludedTerm int
 
 	// raw bytes of the snapshot
@@ -34,11 +34,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.lockMutex()
 	defer rf.unlockMutex()
 
-	if rf.killed() || args.Term < rf.currentTerm || args.LastIncludedIndex <= rf.snapshotIndex {
+	if rf.killed() || args.Term < rf.currentTerm || args.LastIncludedIndex <= rf.snapshotIndex ||
+		rf.lastApplied < args.LastIncludedIndex {
 		return
 	}
-	if args.Term > rf.currentTerm {
-		rf.dLog("... term out of date in AppendEntries")
+	if args.Term > rf.currentTerm || (args.Term == rf.currentTerm && rf.currentRole == Candidate) {
+		rf.dLog("... term out of date in InstallSnapshot")
 		rf.becomeFollower(args.Term)
 	}
 	// If existing log entry has the same index and term as snapshot’s last included entry,
@@ -46,23 +47,23 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// else
 	//		Discard the entire log
 
-	rf.dLog("[%d] Before changing logs for snapshot\n", rf.me)
+	rf.dLog("Before changing logs for snapshot\n")
 	rf.dLog("args.LastIncludedIndex: %d\targs.LastIncludedTerm: %d\trf.logEntries: %v\trf.snapshotIndex: %d\n",
 		args.LastIncludedIndex, args.LastIncludedTerm, rf.logEntries, rf.snapshotIndex)
-	if rf.lastApplied < args.LastIncludedIndex {
-		return
-	}
-	if args.LastIncludedIndex > rf.snapshotIndex {
-		rf.dLog("[%d] - rf.logEntries before snapshot change: %v\n", rf.me, rf.logEntries)
-		rf.snapshotTerm = rf.logEntryAtIndex(args.LastIncludedIndex).Term
+	rf.dLog("rf.logEntries before snapshot change: %v\n", rf.logEntries)
+
+	if args.LastIncludedIndex >= rf.logLength() {
+		rf.logEntries = []LogEntry{}
+	} else {
 		rf.logEntries = rf.logEntriesBetween(args.LastIncludedIndex+1, rf.logLength())
-		rf.snapshot = args.Data
-		rf.snapshotIndex = args.LastIncludedIndex
-		rf.dLog("[%d] - send snapshot to newApplyReadyCh InstallSnapshot logEntries after change: %v snapshotIndex: %v\n", rf.me, rf.logEntries, rf.snapshotIndex)
-		rf.newApplyReadyCh <- ApplyMsg{CommandValid: false}
-		reply.Term = rf.currentTerm
-		rf.persist()
 	}
+	rf.snapshotIndex = args.LastIncludedIndex
+	rf.snapshotTerm = args.LastIncludedTerm
+	rf.snapshot = args.Data
+	rf.dLog("send snapshot to newApplyReadyCh InstallSnapshot logEntries after change: %v snapshotIndex: %v\n", rf.logEntries, rf.snapshotIndex)
+	rf.newApplyReadyCh <- ApplyMsg{CommandValid: false}
+	reply.Term = rf.currentTerm
+	rf.persist()
 }
 
 func (rf *Raft) snapshotToPeers(args InstallSnapshotArgs, savedCurrentTerm int) {
@@ -70,6 +71,7 @@ func (rf *Raft) snapshotToPeers(args InstallSnapshotArgs, savedCurrentTerm int) 
 		reply := InstallSnapshotReply{
 			Term: -1,
 		}
+		rf.dLog("rf.sendInstallSnapshot to peer: %d, args: %v", peerId, args)
 		ok := rf.sendInstallSnapshot(peerId, &args, &reply)
 		if ok && reply.Term != -1 {
 			if reply.Term > savedCurrentTerm {
@@ -81,29 +83,21 @@ func (rf *Raft) snapshotToPeers(args InstallSnapshotArgs, savedCurrentTerm int) 
 			rf.onInstallSnapshotReplySuccess(peerId, args, reply, savedCurrentTerm)
 		}
 	}
-	return
 }
 
 func (rf *Raft) onInstallSnapshotReplySuccess(peerId int, args InstallSnapshotArgs, reply InstallSnapshotReply, savedCurrentTerm int) {
-	//rf.lockMutex()
-	//defer rf.unlockMutex()
-	//ni := rf.snapshotIndex + len(rf.logEntries) + 1
-	//if ni > rf.nextIndex[peerId] {
-	//	rf.nextIndex[peerId] = ni
-	//	rf.matchIndex[peerId] = ni - 1
-	//}
-
-	//for i := rf.commitIndex + 1; i < rf.logLength(); i++ {
-	//	if rf.logEntryAtIndex(i).Term == rf.currentTerm {
-	//		matchCount := 1
-	//		for peerId := range rf.peers {
-	//			if rf.matchIndex[peerId] >= i {
-	//				matchCount++
-	//			}
-	//		}
-	//		if matchCount*2 > len(rf.peers)+1 {
-	//			rf.commitIndex = i
-	//		}
-	//	}
-	//}
+	rf.lockMutex()
+	defer rf.unlockMutex()
+	if rf.currentRole == Leader {
+		if args.LastIncludedIndex > rf.matchIndex[peerId] {
+			rf.matchIndex[peerId] = args.LastIncludedIndex
+		}
+		if args.LastIncludedIndex+1 > rf.nextIndex[peerId] {
+			rf.nextIndex[peerId] = args.LastIncludedIndex + 1
+		}
+	}
+	if rf.lastApplied < rf.snapshotIndex {
+		rf.newApplyReadyCh <- ApplyMsg{CommandValid: false}
+	}
+	rf.dLog("rf.onInstallSnapshotReplySuccess from peer: %d, args: %v, matchIndex[peer]: %d, nextIndex[peer]: %d\nlastApplied: %d, snapShotIndex: %d", peerId, args, rf.matchIndex[peerId], rf.nextIndex[peerId], rf.lastApplied, rf.snapshotIndex)
 }
