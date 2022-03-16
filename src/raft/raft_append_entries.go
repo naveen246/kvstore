@@ -241,7 +241,7 @@ func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply
 	rf.lockMutex()
 	if reply.ConflictTerm >= 0 {
 		lastIndexOfTerm := -1
-		for i := rf.logLength() - 1; i >= rf.snapshotIndex; i-- {
+		for i := rf.logLength() - 1; i > rf.snapshotIndex; i-- {
 			logEntry, _ := rf.logEntryAtIndex(i)
 			if logEntry.Term == reply.ConflictTerm {
 				lastIndexOfTerm = i
@@ -282,7 +282,7 @@ func (rf *Raft) onAppendEntriesReplySuccess(peerId int, reply AppendEntriesReply
 		rf.matchIndex[peerId] = reply.AckMatchIndex
 	} else {
 		rf.dLog("decreasing nextIndex, reply from peer: %d is %+v, rf.matchIndex: %d", peerId, reply, rf.matchIndex[peerId])
-		//rf.nextIndex[peerId] -= 1
+		rf.nextIndex[peerId] -= 1
 		rf.unlockMutex()
 		return
 	}

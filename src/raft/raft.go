@@ -339,7 +339,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.currentTerm
 		isLeader = true
 		rf.matchIndex[rf.me] = index
-		rf.nextIndex[rf.me] = index + 1
+		//rf.nextIndex[rf.me] = index + 1
 		rf.unlockMutex()
 		rf.dLog("Start agreement: Send to triggerAECh channel")
 		rf.triggerAECh <- struct{}{}
@@ -512,15 +512,15 @@ func (rf *Raft) startLeader() {
 				}
 				rf.dLog("Call leaderSendAEs inside heartbeat: time elapsed since electionResetEvent - %+v", time.Since(rf.electionResetEvent))
 				currentTerm := rf.currentTerm
+				args := rf.getInstallSnapshotArgs(rf.snapshotIndex, rf.snapshotTerm, rf.snapshot, rf.currentTerm)
+				shouldSendSnapshot := map[int]bool{}
+				for peerId := range rf.peers {
+					shouldSendSnapshot[peerId] = rf.snapshotIndex >= 0 && rf.matchIndex[peerId] < rf.snapshotIndex
+				}
 				rf.unlockMutex()
 				rf.leaderSendAEs(currentTerm)
 				for peerId := range rf.peers {
-					rf.lockMutex()
-					args := rf.getInstallSnapshotArgs(rf.snapshotIndex, rf.snapshotTerm, rf.snapshot, rf.currentTerm)
-					matchIndex := rf.matchIndex[peerId]
-					snapshotIndex := rf.snapshotIndex
-					rf.unlockMutex()
-					if snapshotIndex >= 0 && matchIndex < snapshotIndex {
+					if shouldSendSnapshot[peerId] {
 						rf.dLog("Call rf.snapshotToPeer, peerId: %d, InstallSnapshotArgs: %+v", peerId, InstallSnapshotArgsToStr(args))
 						go rf.snapshotToPeer(peerId, args)
 					}
@@ -552,16 +552,16 @@ func (rf *Raft) applyChSender() {
 	for {
 		select {
 		case <-rf.snapshotReadyCh:
-			rf.applySnapshotChSender()
+			go rf.applySnapshotChSender()
 			continue
 		default:
 		}
 		select {
 		case <-rf.snapshotReadyCh:
-			rf.applySnapshotChSender()
+			go rf.applySnapshotChSender()
 			continue
 		case <-rf.commitReadyCh:
-			rf.applyCommitChSender()
+			go rf.applyCommitChSender()
 			continue
 		}
 	}
