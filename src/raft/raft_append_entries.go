@@ -38,7 +38,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	defer rf.unlockMutex()
 
 	rf.dLog("AppendEntries: %+v", args)
-	rf.dLog("AppendEntries(): time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
+	rf.dLog("AppendEntries(): time elapsed since electionResetEvent - %+v", time.Since(rf.electionResetEvent))
 
 	if args.Term > rf.currentTerm || (args.Term == rf.currentTerm && rf.currentRole == Candidate) {
 		rf.dLog("... term out of date in AppendEntries")
@@ -76,7 +76,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	reply.Term = rf.currentTerm
 	rf.persist()
 	rf.dLog("AppendEntries reply: %+v", *reply)
-	rf.dLog("time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
+	rf.dLog("time elapsed since electionResetEvent - %+v", time.Since(rf.electionResetEvent))
 }
 
 func (rf *Raft) updateLog(args AppendEntriesArgs) {
@@ -103,16 +103,16 @@ func (rf *Raft) updateLog(args AppendEntriesArgs) {
 	// - newEntriesIndex points at the end of Entries, or an index where the
 	//   term mismatches with the corresponding logEntries entry
 	if newEntriesIndex < len(args.Entries) {
-		rf.dLog("... inserting entries %v from index %d", args.Entries[newEntriesIndex:], logInsertIndex)
+		rf.dLog("... inserting entries %+v from index %d", args.Entries[newEntriesIndex:], logInsertIndex)
 		rf.logEntries = append(rf.logEntriesBetween(rf.snapshotLength(), logInsertIndex), args.Entries[newEntriesIndex:]...)
-		rf.dLog("... logEntries is now: %v", rf.logEntries)
+		rf.dLog("... logEntries is now: %+v", rf.logEntries)
 	}
 
 	// Set commitIndex
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = intMin(args.LeaderCommit, rf.logLength()-1)
 		rf.dLog("... setting commitIndex=%d", rf.commitIndex)
-		rf.newApplyReadyCh <- ApplyMsg{CommandValid: true}
+		rf.commitReadyCh <- struct{}{}
 	}
 }
 
@@ -132,7 +132,7 @@ func (rf *Raft) conflictIndexAndTerm(args AppendEntriesArgs) (int, int) {
 		prevLogEntry, _ := rf.logEntryAtIndex(args.PrevLogIndex)
 		conflictTerm = prevLogEntry.Term
 		var i int
-		for i = args.PrevLogIndex - 1; i >= rf.snapshotIndex; i-- {
+		for i = args.PrevLogIndex - 1; i > rf.snapshotIndex; i-- {
 			logEntry, _ := rf.logEntryAtIndex(i)
 			if logEntry.Term != conflictTerm {
 				break
@@ -176,10 +176,10 @@ func (rf *Raft) replicateLog(peerId int, leaderCurrentTerm int) {
 	if rf.killed() {
 		return
 	}
-	rf.dLog("sending AppendEntries to %v: args=%v", peerId, args)
+	rf.dLog("sending AppendEntries to %+v: args=%+v", peerId, args)
 	var reply AppendEntriesReply
 	if len(args.Entries) > 0 {
-		rf.dLog("Calling rf.sendAppendEntries with %d entries: %v", len(args.Entries), args.Entries)
+		rf.dLog("Calling rf.sendAppendEntries with %d entries: %+v", len(args.Entries), args.Entries)
 	}
 	ok := rf.sendAppendEntries(peerId, args, &reply)
 	if ok {
@@ -224,7 +224,7 @@ func (rf *Raft) onAppendEntriesReply(peerId int, reply AppendEntriesReply, saved
 	}
 	isLeader := rf.currentRole == Leader
 	rf.unlockMutex()
-	rf.dLog("currentRole: %v, AppendEntriesReply %v", Leader.String(), reply)
+	rf.dLog("currentRole: %+v, AppendEntriesReply %+v", Leader.String(), reply)
 	if reply.Term == savedCurrentTerm && isLeader {
 		if reply.Success {
 			rf.onAppendEntriesReplySuccess(peerId, reply)
@@ -239,7 +239,6 @@ func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply
 		return
 	}
 	rf.lockMutex()
-	defer rf.unlockMutex()
 	if reply.ConflictTerm >= 0 {
 		lastIndexOfTerm := -1
 		for i := rf.logLength() - 1; i >= rf.snapshotIndex; i-- {
@@ -257,6 +256,15 @@ func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply
 	} else {
 		rf.nextIndex[peerId] = reply.ConflictIndex
 	}
+	rf.dLog("onAppendEntriesReplyFailure - peer = %d, AppendEntriesReply = %+v, rf.nextIndex = %+v, rf.matchIndex = %+v, rf.snapshotIndex = %d, rf.log = %+v", peerId, reply, rf.nextIndex, rf.matchIndex, rf.snapshotIndex, rf.logEntries)
+	if rf.snapshotIndex >= 0 && rf.nextIndex[peerId] <= rf.snapshotIndex {
+		args := rf.getInstallSnapshotArgs(rf.snapshotIndex, rf.snapshotTerm, rf.snapshot, rf.currentTerm)
+		rf.dLog("Call rf.snapshotToPeer, peerId: %d, InstallSnapshotArgs: %+v, rf.matchIndex: %+v, rf.snapshotIndex: %d", peerId, InstallSnapshotArgsToStr(args), rf.matchIndex, rf.snapshotIndex)
+		rf.unlockMutex()
+		go rf.snapshotToPeer(peerId, args)
+		return
+	}
+	rf.unlockMutex()
 }
 
 func (rf *Raft) onAppendEntriesReplySuccess(peerId int, reply AppendEntriesReply) {
@@ -264,19 +272,23 @@ func (rf *Raft) onAppendEntriesReplySuccess(peerId int, reply AppendEntriesReply
 		return
 	}
 	rf.lockMutex()
+	if rf.currentRole != Leader {
+		rf.unlockMutex()
+		return
+	}
 	if reply.AckMatchIndex >= rf.matchIndex[peerId] {
 		rf.nextIndex[peerId] = reply.AckMatchIndex + 1
 		rf.dLog("On AE reply success nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
 		rf.matchIndex[peerId] = reply.AckMatchIndex
 	} else {
-		rf.dLog("decreasing nextIndex, reply from peer: %d is %v, rf.matchIndex: %d", peerId, reply, rf.matchIndex[peerId])
+		rf.dLog("decreasing nextIndex, reply from peer: %d is %+v, rf.matchIndex: %d", peerId, reply, rf.matchIndex[peerId])
 		//rf.nextIndex[peerId] -= 1
 		rf.unlockMutex()
 		return
 	}
 
-	rf.dLog("snapshotIndex: %d, logEntries: %v", rf.snapshotIndex, rf.logEntries)
-	rf.dLog("On AE reply success commitIndex before change = %d, matchIndex: %v", rf.commitIndex, rf.matchIndex)
+	rf.dLog("snapshotIndex: %d, logEntries: %+v", rf.snapshotIndex, rf.logEntries)
+	rf.dLog("On AE reply success commitIndex before change = %d, matchIndex: %+v", rf.commitIndex, rf.matchIndex)
 	savedCommitIndex := rf.commitIndex
 	for i := rf.commitIndex + 1; i < rf.logLength(); i++ {
 		logEntry, _ := rf.logEntryAtIndex(i)
@@ -292,16 +304,16 @@ func (rf *Raft) onAppendEntriesReplySuccess(peerId int, reply AppendEntriesReply
 			}
 		}
 	}
-	rf.dLog("On AE reply success commitIndex after change = %d, matchIndex: %v", rf.commitIndex, rf.matchIndex)
+	rf.dLog("On AE reply success commitIndex after change = %d, matchIndex: %+v", rf.commitIndex, rf.matchIndex)
 	rf.persist()
-	rf.dLog("AppendEntries reply from %d success: nextIndex := %v, matchIndex := %v; commitIndex := %d", peerId, rf.nextIndex, rf.matchIndex, rf.commitIndex)
+	rf.dLog("AppendEntries reply from %d success: nextIndex := %+v, matchIndex := %+v; commitIndex := %d", peerId, rf.nextIndex, rf.matchIndex, rf.commitIndex)
 
 	if rf.commitIndex != savedCommitIndex {
 		rf.dLog("leader sets commitIndex := %d", rf.commitIndex)
 		// Commit index changed: the leader considers new entries to be
 		// committed. Send new entries on the commit channel to this
 		// leader's clients, and notify followers by sending them AEs.
-		rf.newApplyReadyCh <- ApplyMsg{CommandValid: true}
+		rf.commitReadyCh <- struct{}{}
 		rf.unlockMutex()
 		rf.triggerAECh <- struct{}{}
 		rf.dLog("Sent to triggerAECh channel")

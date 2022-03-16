@@ -113,10 +113,15 @@ type Raft struct {
 	// entries. It's passed in by the client during construction.
 	applyCh chan<- ApplyMsg
 
-	// newApplyReadyCh is an internal notification channel used by goroutines
+	// commitReadyCh is an internal notification channel used by goroutines
 	// that commit new entries to the logEntries to notify that these entries may be sent
 	// on applyCh.
-	newApplyReadyCh chan ApplyMsg
+	commitReadyCh chan struct{}
+
+	// snapshotReadyCh is an internal notification channel used by goroutines
+	// that create snapshot to notify that the snapshot entry may be sent
+	// on applyCh.
+	snapshotReadyCh chan struct{}
 
 	// triggerAECh is an internal notification channel used to trigger
 	// sending new AEs to followers when interesting changes occurred.
@@ -238,7 +243,7 @@ func (rf *Raft) persist() {
 
 	data := w.Bytes()
 	rf.persister.SaveStateAndSnapshot(data, rf.snapshot)
-	rf.dLog("persist(): time elapsed since electionResetEvent: %v", time.Since(rf.electionResetEvent))
+	rf.dLog("persist(): time elapsed since electionResetEvent: %+v", time.Since(rf.electionResetEvent))
 }
 
 //
@@ -293,14 +298,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.lockMutex()
 	logEntry, err := rf.logEntryAtIndex(index)
 	currentTerm := rf.currentTerm
+	currentRole := rf.currentRole
 	rf.unlockMutex()
-	if !rf.killed() && err == nil {
-		args := InstallSnapshotArgs{
-			LastIncludedIndex: index,
-			LastIncludedTerm:  logEntry.Term,
-			Data:              snapshot,
-		}
-		rf.snapshotToPeers(args, currentTerm)
+	if !rf.killed() && err == nil && currentRole == Leader {
+		rf.leaderSendInstallSnapshot(index, logEntry.Term, snapshot, currentTerm)
 	}
 }
 
@@ -327,13 +328,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.lockMutex()
 	if rf.currentRole == Leader && !rf.killed() {
-		rf.dLog("Start agreement on next command: %v\t logEntries: %v at node %v", command, rf.logEntries, rf.me)
+		rf.dLog("Start agreement on next command: %+v\t logEntries: %+v at node %+v", command, rf.logEntries, rf.me)
 		rf.logEntries = append(rf.logEntries, LogEntry{
 			Command: command,
 			Term:    rf.currentTerm,
 		})
 		rf.persist()
-		rf.dLog("... logEntries=%v", rf.logEntries)
+		rf.dLog("... logEntries=%+v", rf.logEntries)
 		index = rf.logLength() - 1
 		term = rf.currentTerm
 		isLeader = true
@@ -364,8 +365,8 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.dLog("node dead")
 	rf.lockMutex()
-	close(rf.newApplyReadyCh)
-	//close(rf.applyCh)
+	close(rf.commitReadyCh)
+	close(rf.snapshotReadyCh)
 	rf.unlockMutex()
 }
 
@@ -387,7 +388,7 @@ func (rf *Raft) ticker() {
 	rf.lockMutex()
 	termStarted := rf.currentTerm
 	rf.unlockMutex()
-	rf.dLog("election timer started (%v), term=%d", timeoutDuration, termStarted)
+	rf.dLog("election timer started (%+v), term=%d", timeoutDuration, termStarted)
 
 	// This loops until either:
 	// - we discover the election timer is no longer needed, or
@@ -414,7 +415,7 @@ func (rf *Raft) ticker() {
 		// someone for the duration of the timeout.
 		elapsed := time.Since(rf.electionResetEvent)
 		if elapsed >= timeoutDuration {
-			rf.dLog("elapsed: %v, timeoutDuration: %v, electionResetEvent: %v", elapsed, timeoutDuration, rf.electionResetEvent)
+			rf.dLog("elapsed: %+v, timeoutDuration: %+v, electionResetEvent: %+v", elapsed, timeoutDuration, rf.electionResetEvent)
 			rf.startElection()
 			rf.unlockMutex()
 			return
@@ -425,14 +426,14 @@ func (rf *Raft) ticker() {
 
 // Expects rf.mu to be locked.
 func (rf *Raft) becomeCandidate() int {
-	rf.dLog("startElection currentRole: %v", rf.currentRole)
+	rf.dLog("startElection currentRole: %+v", rf.currentRole)
 	rf.currentTerm += 1
 	rf.currentRole = Candidate
 	rf.votedFor = rf.me
 	rf.electionResetEvent = time.Now()
 	rf.persist()
 	rf.dLog("electionResetEvent in startElection")
-	rf.dLog("becomes Candidate (currentTerm=%d); logEntries=%v", rf.currentTerm, rf.logEntries)
+	rf.dLog("becomes Candidate (currentTerm=%d); logEntries=%+v", rf.currentTerm, rf.logEntries)
 	return rf.currentTerm
 }
 
@@ -440,7 +441,7 @@ func (rf *Raft) becomeCandidate() int {
 // Expects rf.mu to be locked.
 func (rf *Raft) becomeFollower(term int) {
 	rf.currentRole = Follower
-	rf.dLog("becomes Follower with term=%d; logEntries=%v", term, rf.logEntries)
+	rf.dLog("becomes Follower with term=%d; logEntries=%+v", term, rf.logEntries)
 	rf.currentTerm = term
 	rf.votedFor = -1
 	rf.electionResetEvent = time.Now()
@@ -457,7 +458,7 @@ func (rf *Raft) becomeLeader() {
 		rf.nextIndex[peerId] = rf.logLength()
 		rf.matchIndex[peerId] = -1
 	}
-	rf.dLog("becomes Leader; term=%d, nextIndex=%v, matchIndex=%v; logEntries=%v", rf.currentTerm, rf.nextIndex, rf.matchIndex, rf.logEntries)
+	rf.dLog("becomes Leader; term=%d, nextIndex=%+v, matchIndex=%+v; logEntries=%+v", rf.currentTerm, rf.nextIndex, rf.matchIndex, rf.logEntries)
 }
 
 // startLeader switches node into a leader state and begins process of heartbeats.
@@ -509,10 +510,21 @@ func (rf *Raft) startLeader() {
 					rf.unlockMutex()
 					return
 				}
-				rf.dLog("Call leaderSendAEs inside heartbeat: time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
+				rf.dLog("Call leaderSendAEs inside heartbeat: time elapsed since electionResetEvent - %+v", time.Since(rf.electionResetEvent))
 				currentTerm := rf.currentTerm
 				rf.unlockMutex()
 				rf.leaderSendAEs(currentTerm)
+				for peerId := range rf.peers {
+					rf.lockMutex()
+					args := rf.getInstallSnapshotArgs(rf.snapshotIndex, rf.snapshotTerm, rf.snapshot, rf.currentTerm)
+					matchIndex := rf.matchIndex[peerId]
+					snapshotIndex := rf.snapshotIndex
+					rf.unlockMutex()
+					if snapshotIndex >= 0 && matchIndex < snapshotIndex {
+						rf.dLog("Call rf.snapshotToPeer, peerId: %d, InstallSnapshotArgs: %+v", peerId, InstallSnapshotArgsToStr(args))
+						go rf.snapshotToPeer(peerId, args)
+					}
+				}
 			}
 		}
 	}(HeartBeatTimeout)
@@ -531,66 +543,88 @@ func getGID() uint64 {
 // dLog logs a debugging message if DebugMode is true.
 func (rf *Raft) dLog(format string, args ...interface{}) {
 	if DebugMode {
-		format = fmt.Sprintf("[Goroutine: %v]\t\t[%d]\t", getGID(), rf.me) + format
+		format = fmt.Sprintf("[Goroutine: %+v]\t\t[%d]\t", getGID(), rf.me) + format
 		log.Printf(format, args...)
 	}
 }
 
-// applyChSender is responsible for sending committed entries on
-// rf.applyCh. It watches newApplyReadyCh for notifications and calculates
-// which new entries are ready to be sent. This method should run in a separate
-// background goroutine; rf.applyCh may be buffered and will limit how fast
-// the client consumes new committed entries. Returns when newApplyReadyCh is
-// closed.
 func (rf *Raft) applyChSender() {
-	for applyMsg := range rf.newApplyReadyCh {
-		if applyMsg.CommandValid {
-			// Find which entries we have to apply.
-			var entries []LogEntry
-			rf.lockMutex()
-			//savedTerm := rf.currentTerm
-			savedLastApplied := rf.lastApplied
-			rf.dLog("Before applyCh rf.lastApplied: %d, rf.commitIndex: %d, rf.snapshotIndex: %d, rf.logEntries: %v", rf.lastApplied, rf.commitIndex, rf.snapshotIndex, rf.logEntries)
-			if rf.commitIndex > rf.lastApplied {
-				entries = rf.logEntriesBetween(rf.lastApplied+1, rf.commitIndex+1)
-				rf.lastApplied = rf.commitIndex
-			}
-			rf.unlockMutex()
-			rf.dLog("applyChSender entries=%v, savedLastApplied=%d", entries, savedLastApplied)
-
-			for i, entry := range entries {
-				rf.applyCh <- ApplyMsg{
-					CommandValid:  true,
-					Command:       entry.Command,
-					CommandIndex:  savedLastApplied + i + 1,
-					SnapshotValid: false,
-					Snapshot:      nil,
-					SnapshotTerm:  0,
-					SnapshotIndex: 0,
-				}
-			}
-		} else {
-			rf.lockMutex()
-			snapshot := rf.snapshot
-			snapshotIndex := rf.snapshotIndex
-			snapshotTerm := rf.snapshotTerm
-			if rf.lastApplied < rf.snapshotIndex {
-				rf.lastApplied = rf.snapshotIndex
-			}
-			rf.unlockMutex()
-			rf.dLog("applySnapshotChSender snapshot=%v, snapshotIndex=%d, snapshotTerm=%d", snapshot, snapshotIndex, snapshotTerm)
-			rf.applyCh <- ApplyMsg{
-				CommandValid:  false,
-				Command:       nil,
-				CommandIndex:  -1,
-				SnapshotValid: true,
-				Snapshot:      snapshot,
-				SnapshotTerm:  snapshotTerm,
-				SnapshotIndex: snapshotIndex,
-			}
+	for {
+		select {
+		case <-rf.snapshotReadyCh:
+			rf.applySnapshotChSender()
+			continue
+		default:
+		}
+		select {
+		case <-rf.snapshotReadyCh:
+			rf.applySnapshotChSender()
+			continue
+		case <-rf.commitReadyCh:
+			rf.applyCommitChSender()
+			continue
 		}
 	}
-	rf.dLog("applyChSender done")
+}
+
+// applyCommitChSender is responsible for sending committed entries on
+// rf.applyCh. It watches commitReadyCh for notifications and calculates
+// which new entries are ready to be sent. This method should run in a separate
+// background goroutine; rf.applyCh may be buffered and will limit how fast
+// the client consumes new committed entries. Returns when commitReadyCh is
+// closed.
+func (rf *Raft) applyCommitChSender() {
+	//for range rf.commitReadyCh {
+	// Find which entries we have to apply.
+	var entries []LogEntry
+	rf.lockMutex()
+	savedLastApplied := rf.lastApplied
+	rf.dLog("Before applyCh rf.lastApplied: %d, rf.commitIndex: %d, rf.snapshotIndex: %d, rf.logEntries: %+v", rf.lastApplied, rf.commitIndex, rf.snapshotIndex, rf.logEntries)
+	if rf.commitIndex > rf.lastApplied {
+		entries = rf.logEntriesBetween(rf.lastApplied+1, rf.commitIndex+1)
+		rf.lastApplied = rf.commitIndex
+	}
+	rf.unlockMutex()
+	rf.dLog("applyCommitChSender entries=%+v, savedLastApplied=%d", entries, savedLastApplied)
+
+	for i, entry := range entries {
+		rf.applyCh <- ApplyMsg{
+			CommandValid:  true,
+			Command:       entry.Command,
+			CommandIndex:  savedLastApplied + i + 1,
+			SnapshotValid: false,
+			Snapshot:      nil,
+			SnapshotTerm:  0,
+			SnapshotIndex: 0,
+		}
+	}
+	//}
+	rf.dLog("applyCommitChSender done")
+}
+
+func (rf *Raft) applySnapshotChSender() {
+	//for range rf.snapshotReadyCh {
+	rf.lockMutex()
+	snapshot := rf.snapshot
+	snapshotIndex := rf.snapshotIndex
+	snapshotTerm := rf.snapshotTerm
+	//if rf.lastApplied < rf.snapshotIndex {
+	rf.lastApplied = rf.snapshotIndex
+	//}
+	rf.unlockMutex()
+	if snapshotIndex >= 0 {
+		rf.dLog("applySnapshotChSender snapshotIndex=%d, snapshotTerm=%d", snapshotIndex, snapshotTerm)
+		rf.applyCh <- ApplyMsg{
+			CommandValid:  false,
+			Command:       nil,
+			CommandIndex:  -1,
+			SnapshotValid: true,
+			Snapshot:      snapshot,
+			SnapshotTerm:  snapshotTerm,
+			SnapshotIndex: snapshotIndex,
+		}
+	}
+	//}
 }
 
 //
@@ -611,7 +645,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.applyCh = applyCh
-	rf.newApplyReadyCh = make(chan ApplyMsg, 16)
+	rf.commitReadyCh = make(chan struct{}, 16)
+	rf.snapshotReadyCh = make(chan struct{}, 16)
 	rf.triggerAECh = make(chan struct{}, 1)
 
 	rf.currentTerm = 0
@@ -620,9 +655,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		Command: byte(1),
 		Term:    0,
 	}}
-	rf.commitIndex = -1
+	rf.commitIndex = 0
 	rf.currentRole = Follower
-	rf.lastApplied = -1
+	rf.lastApplied = 0
 	rf.nextIndex = make(map[int]int)
 	rf.matchIndex = make(map[int]int)
 	rf.snapshotIndex = -1
@@ -644,6 +679,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}()
 
 	go rf.applyChSender()
+	//go rf.applySnapshotChSender()
 	return rf
 }
 
