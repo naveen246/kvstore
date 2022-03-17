@@ -113,10 +113,10 @@ type Raft struct {
 	// entries. It's passed in by the client during construction.
 	applyCh chan<- ApplyMsg
 
-	// commitReadyCh is an internal notification channel used by goroutines
+	// commandReadyCh is an internal notification channel used by goroutines
 	// that commit new entries to the logEntries to notify that these entries may be sent
 	// on applyCh.
-	commitReadyCh chan struct{}
+	commandReadyCh chan struct{}
 
 	// snapshotReadyCh is an internal notification channel used by goroutines
 	// that create snapshot to notify that the snapshot entry may be sent
@@ -339,7 +339,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.currentTerm
 		isLeader = true
 		rf.matchIndex[rf.me] = index
-		//rf.nextIndex[rf.me] = index + 1
+		rf.nextIndex[rf.me] = index + 1
 		rf.unlockMutex()
 		rf.dLog("Start agreement: Send to triggerAECh channel")
 		rf.triggerAECh <- struct{}{}
@@ -365,7 +365,7 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.dLog("node dead")
 	rf.lockMutex()
-	close(rf.commitReadyCh)
+	close(rf.commandReadyCh)
 	close(rf.snapshotReadyCh)
 	rf.unlockMutex()
 }
@@ -552,29 +552,29 @@ func (rf *Raft) applyChSender() {
 	for {
 		select {
 		case <-rf.snapshotReadyCh:
-			go rf.applySnapshotChSender()
+			rf.applySnapshotChSender()
 			continue
 		default:
 		}
 		select {
 		case <-rf.snapshotReadyCh:
-			go rf.applySnapshotChSender()
+			rf.applySnapshotChSender()
 			continue
-		case <-rf.commitReadyCh:
-			go rf.applyCommitChSender()
+		case <-rf.commandReadyCh:
+			rf.applyCommandChSender()
 			continue
 		}
 	}
 }
 
-// applyCommitChSender is responsible for sending committed entries on
-// rf.applyCh. It watches commitReadyCh for notifications and calculates
+// applyCommandChSender is responsible for sending committed entries on
+// rf.applyCh. It watches commandReadyCh for notifications and calculates
 // which new entries are ready to be sent. This method should run in a separate
 // background goroutine; rf.applyCh may be buffered and will limit how fast
-// the client consumes new committed entries. Returns when commitReadyCh is
+// the client consumes new committed entries. Returns when commandReadyCh is
 // closed.
-func (rf *Raft) applyCommitChSender() {
-	//for range rf.commitReadyCh {
+func (rf *Raft) applyCommandChSender() {
+	//for range rf.commandReadyCh {
 	// Find which entries we have to apply.
 	var entries []LogEntry
 	rf.lockMutex()
@@ -582,24 +582,53 @@ func (rf *Raft) applyCommitChSender() {
 	rf.dLog("Before applyCh rf.lastApplied: %d, rf.commitIndex: %d, rf.snapshotIndex: %d, rf.logEntries: %+v", rf.lastApplied, rf.commitIndex, rf.snapshotIndex, rf.logEntries)
 	if rf.commitIndex > rf.lastApplied {
 		entries = rf.logEntriesBetween(rf.lastApplied+1, rf.commitIndex+1)
-		rf.lastApplied = rf.commitIndex
+		rf.lastApplied += 1
+		rf.dLog("applyCommandChSender: rf.lastApplied is set to %d", rf.lastApplied)
 	}
 	rf.unlockMutex()
-	rf.dLog("applyCommitChSender entries=%+v, savedLastApplied=%d", entries, savedLastApplied)
 
-	for i, entry := range entries {
-		rf.applyCh <- ApplyMsg{
+	if len(entries) > 0 {
+		applyMsg := ApplyMsg{
 			CommandValid:  true,
-			Command:       entry.Command,
-			CommandIndex:  savedLastApplied + i + 1,
+			Command:       entries[0].Command,
+			CommandIndex:  savedLastApplied + 1,
 			SnapshotValid: false,
 			Snapshot:      nil,
 			SnapshotTerm:  0,
 			SnapshotIndex: 0,
 		}
+		rf.dLog("applyChSender Command: ApplyMsg=%+v", applyMsg)
+		rf.applyCh <- applyMsg
 	}
+
+	if len(entries) > 1 {
+		rf.lockMutex()
+		rf.commandReadyCh <- struct{}{}
+		rf.unlockMutex()
+	}
+
+	//for i, entry := range entries {
+	//	rf.lockMutex()
+	//	if rf.lastApplied < savedLastApplied+i {
+	//		rf.commandReadyCh <- struct{}{}
+	//		rf.unlockMutex()
+	//		break
+	//	}
+	//	rf.unlockMutex()
+	//	applyMsg := ApplyMsg{
+	//		CommandValid:  true,
+	//		Command:       entry.Command,
+	//		CommandIndex:  savedLastApplied + i + 1,
+	//		SnapshotValid: false,
+	//		Snapshot:      nil,
+	//		SnapshotTerm:  0,
+	//		SnapshotIndex: 0,
+	//	}
+	//	rf.dLog("applyChSender Command: ApplyMsg=%+v", applyMsg)
+	//	rf.applyCh <- applyMsg
 	//}
-	rf.dLog("applyCommitChSender done")
+
+	//}
 }
 
 func (rf *Raft) applySnapshotChSender() {
@@ -610,10 +639,11 @@ func (rf *Raft) applySnapshotChSender() {
 	snapshotTerm := rf.snapshotTerm
 	//if rf.lastApplied < rf.snapshotIndex {
 	rf.lastApplied = rf.snapshotIndex
+	rf.dLog("applySnapshotChSender: rf.lastApplied is set to %d", rf.lastApplied)
 	//}
 	rf.unlockMutex()
 	if snapshotIndex >= 0 {
-		rf.dLog("applySnapshotChSender snapshotIndex=%d, snapshotTerm=%d", snapshotIndex, snapshotTerm)
+		rf.dLog("applyChSender Snapshot: snapshotIndex=%d, snapshotTerm=%d", snapshotIndex, snapshotTerm)
 		rf.applyCh <- ApplyMsg{
 			CommandValid:  false,
 			Command:       nil,
@@ -645,7 +675,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.applyCh = applyCh
-	rf.commitReadyCh = make(chan struct{}, 16)
+	rf.commandReadyCh = make(chan struct{}, 16)
 	rf.snapshotReadyCh = make(chan struct{}, 16)
 	rf.triggerAECh = make(chan struct{}, 1)
 
