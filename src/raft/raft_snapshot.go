@@ -23,7 +23,6 @@ type InstallSnapshotArgs struct {
 type InstallSnapshotReply struct {
 	Term             int
 	AckSnapshotIndex int
-	Success          bool
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
@@ -37,7 +36,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.lockMutex()
 	defer rf.unlockMutex()
 	reply.Term = rf.currentTerm
-	reply.Success = false
+	reply.AckSnapshotIndex = rf.snapshotIndex
 	rf.dLog("InstallSnapshotArgs: %+v, rf.currentTerm: %d, rf.snapshotIndex: %d, rf.lastApplied: %d", InstallSnapshotArgsToStr(*args), rf.currentTerm, rf.snapshotIndex, rf.lastApplied)
 
 	if rf.killed() || args.Term < rf.currentTerm || args.LastIncludedIndex <= rf.snapshotIndex {
@@ -55,7 +54,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.snapshotTerm = args.LastIncludedTerm
 	rf.snapshot = args.Data
 	reply.AckSnapshotIndex = rf.snapshotIndex
-	reply.Success = true
 	rf.dLog("send snapshot to commandReadyCh InstallSnapshot logEntries after change: %+v snapshotIndex: %+v\n", rf.logEntries, rf.snapshotIndex)
 	rf.snapshotReadyCh <- struct{}{}
 
@@ -113,11 +111,11 @@ func (rf *Raft) onInstallSnapshotReply(peerId int, args InstallSnapshotArgs, rep
 		rf.becomeFollower(reply.Term)
 		return
 	}
-	if reply.Success && reply.AckSnapshotIndex > rf.matchIndex[peerId] {
+	if reply.AckSnapshotIndex > rf.matchIndex[peerId] {
 		rf.matchIndex[peerId] = reply.AckSnapshotIndex
 		rf.nextIndex[peerId] = reply.AckSnapshotIndex + 1
 	}
-	if reply.Success && reply.AckSnapshotIndex+1 > rf.nextIndex[peerId] {
+	if reply.AckSnapshotIndex+1 > rf.nextIndex[peerId] {
 		rf.nextIndex[peerId] = reply.AckSnapshotIndex + 1
 	}
 	rf.dLog("onInstallSnapshotReply - peer: %d, InstallSnapshotArgs: %+v, InstallSnapshotReply: %+v, rf.matchIndex: %+v, rf.nextIndex: %+v", peerId, InstallSnapshotArgsToStr(args), reply, rf.matchIndex, rf.nextIndex)

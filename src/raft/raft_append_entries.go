@@ -14,9 +14,10 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term          int
-	Success       bool
-	AckMatchIndex int
+	Term             int
+	Success          bool
+	AckMatchIndex    int
+	AckSnapshotIndex int
 
 	ConflictIndex int
 	ConflictTerm  int
@@ -66,10 +67,12 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			rf.updateLog(args)
 			reply.Success = true
 			reply.AckMatchIndex = args.PrevLogIndex + len(args.Entries)
+			reply.AckSnapshotIndex = rf.snapshotIndex
 		} else {
 			reply.ConflictIndex, reply.ConflictTerm = rf.conflictIndexAndTerm(args)
 			reply.Success = false
 			reply.AckMatchIndex = -1
+			reply.AckSnapshotIndex = -1
 		}
 	}
 
@@ -124,9 +127,6 @@ func (rf *Raft) conflictIndexAndTerm(args AppendEntriesArgs) (int, int) {
 	if args.PrevLogIndex >= rf.logLength() {
 		conflictIndex = rf.logLength()
 		conflictTerm = -1
-	} else if args.PrevLogIndex == rf.snapshotIndex {
-		conflictIndex = rf.snapshotIndex + 1
-		conflictTerm = rf.snapshotTerm
 	} else {
 		// PrevLogIndex points within our logEntries, but PrevLogTerm doesn't match rf.logEntries[PrevLogIndex].
 		prevLogEntry, _ := rf.logEntryAtIndex(args.PrevLogIndex)
@@ -139,6 +139,10 @@ func (rf *Raft) conflictIndexAndTerm(args AppendEntriesArgs) (int, int) {
 			}
 		}
 		conflictIndex = i + 1
+	}
+	if conflictIndex <= rf.snapshotIndex {
+		conflictIndex = rf.snapshotIndex + 1
+		conflictTerm = rf.snapshotTerm
 	}
 	return conflictIndex, conflictTerm
 }
@@ -257,7 +261,7 @@ func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply
 		rf.nextIndex[peerId] = reply.ConflictIndex
 	}
 	rf.dLog("onAppendEntriesReplyFailure - peer = %d, AppendEntriesReply = %+v, rf.nextIndex = %+v, rf.matchIndex = %+v, rf.snapshotIndex = %d, rf.log = %+v", peerId, reply, rf.nextIndex, rf.matchIndex, rf.snapshotIndex, rf.logEntries)
-	if rf.snapshotIndex >= 0 && rf.nextIndex[peerId] <= rf.snapshotIndex {
+	if reply.AckSnapshotIndex >= 0 && rf.nextIndex[peerId] <= reply.AckSnapshotIndex {
 		args := rf.getInstallSnapshotArgs(rf.snapshotIndex, rf.snapshotTerm, rf.snapshot, rf.currentTerm)
 		rf.dLog("Call rf.snapshotToPeer, peerId: %d, InstallSnapshotArgs: %+v, rf.matchIndex: %+v, rf.snapshotIndex: %d", peerId, InstallSnapshotArgsToStr(args), rf.matchIndex, rf.snapshotIndex)
 		rf.unlockMutex()
@@ -280,7 +284,7 @@ func (rf *Raft) onAppendEntriesReplySuccess(peerId int, reply AppendEntriesReply
 		rf.nextIndex[peerId] = reply.AckMatchIndex + 1
 		rf.dLog("On AE reply success nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
 		rf.matchIndex[peerId] = reply.AckMatchIndex
-	} else {
+	} else if rf.nextIndex[peerId] > reply.AckSnapshotIndex+1 {
 		rf.dLog("decreasing nextIndex, reply from peer: %d is %+v, rf.matchIndex: %d", peerId, reply, rf.matchIndex[peerId])
 		rf.nextIndex[peerId] -= 1
 		rf.unlockMutex()

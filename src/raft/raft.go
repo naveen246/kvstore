@@ -36,7 +36,7 @@ import (
 	"6.824/labrpc"
 )
 
-const DebugMode = false
+const DebugMode = true
 
 const (
 	ElectionTimeout  = 300 * time.Millisecond
