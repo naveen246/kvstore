@@ -674,7 +674,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	}()
 
 	go rf.applyChSender()
-	//go rf.applySnapshotChSender()
 	return rf
 }
 
