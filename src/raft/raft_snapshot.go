@@ -54,7 +54,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.snapshotTerm = args.LastIncludedTerm
 	rf.snapshot = args.Data
 	reply.AckSnapshotIndex = rf.snapshotIndex
-	rf.dLog("send snapshot to commandReadyCh InstallSnapshot logEntries after change: %+v snapshotIndex: %+v\n", rf.logEntries, rf.snapshotIndex)
+	rf.dLog("send snapshot to snapshotReadyCh InstallSnapshot logEntries after change: %+v snapshotIndex: %+v\n", rf.logEntries, rf.snapshotIndex)
 	rf.snapshotReadyCh <- struct{}{}
 
 	rf.persist()
