@@ -569,6 +569,9 @@ func (rf *Raft) applyChSender() {
 // the client consumes new committed entries. Returns when commandReadyCh is
 // closed.
 func (rf *Raft) applyCommandChSender() {
+	if rf.killed() {
+		return
+	}
 	// Find which entries we have to apply.
 	var entries []LogEntry
 	rf.lockMutex()
@@ -608,6 +611,9 @@ func (rf *Raft) applyCommandChSender() {
 }
 
 func (rf *Raft) applySnapshotChSender() {
+	if rf.killed() {
+		return
+	}
 	rf.lockMutex()
 	snapshot := rf.snapshot
 	snapshotIndex := rf.snapshotIndex
