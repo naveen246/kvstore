@@ -278,6 +278,7 @@ func (rf *Raft) readPersist(data []byte) {
 		rf.snapshotIndex = snapshotIndex
 		rf.snapshotTerm = snapshotTerm
 	}
+	rf.snapshot = rf.persister.ReadSnapshot()
 }
 
 //
@@ -571,6 +572,11 @@ func (rf *Raft) applyCommandChSender() {
 	// Find which entries we have to apply.
 	var entries []LogEntry
 	rf.lockMutex()
+	if rf.lastApplied < rf.snapshotIndex {
+		rf.unlockMutex()
+		rf.applySnapshotChSender()
+		return
+	}
 	savedLastApplied := rf.lastApplied
 	rf.dLog("Before applyCh rf.lastApplied: %d, rf.commitIndex: %d, rf.snapshotIndex: %d, rf.logEntries: %+v", rf.lastApplied, rf.commitIndex, rf.snapshotIndex, rf.logEntries)
 	if rf.commitIndex > rf.lastApplied {
