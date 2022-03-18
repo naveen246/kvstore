@@ -36,7 +36,7 @@ import (
 	"6.824/labrpc"
 )
 
-const DebugMode = true
+const DebugMode = false
 
 const (
 	ElectionTimeout  = 300 * time.Millisecond
@@ -512,19 +512,8 @@ func (rf *Raft) startLeader() {
 				}
 				rf.dLog("Call leaderSendAEs inside heartbeat: time elapsed since electionResetEvent - %+v", time.Since(rf.electionResetEvent))
 				currentTerm := rf.currentTerm
-				args := rf.getInstallSnapshotArgs(rf.snapshotIndex, rf.snapshotTerm, rf.snapshot, rf.currentTerm)
-				shouldSendSnapshot := map[int]bool{}
-				for peerId := range rf.peers {
-					shouldSendSnapshot[peerId] = rf.snapshotIndex >= 0 && rf.matchIndex[peerId] < rf.snapshotIndex
-				}
 				rf.unlockMutex()
 				rf.leaderSendAEs(currentTerm)
-				for peerId := range rf.peers {
-					if shouldSendSnapshot[peerId] {
-						rf.dLog("Call rf.snapshotToPeer, peerId: %d, InstallSnapshotArgs: %+v", peerId, InstallSnapshotArgsToStr(args))
-						go rf.snapshotToPeer(peerId, args)
-					}
-				}
 			}
 		}
 	}(HeartBeatTimeout)
@@ -550,12 +539,17 @@ func (rf *Raft) dLog(format string, args ...interface{}) {
 
 func (rf *Raft) applyChSender() {
 	for {
+		if rf.killed() {
+			return
+		}
+
 		select {
 		case <-rf.snapshotReadyCh:
 			rf.applySnapshotChSender()
 			continue
 		default:
 		}
+
 		select {
 		case <-rf.snapshotReadyCh:
 			rf.applySnapshotChSender()
@@ -574,7 +568,6 @@ func (rf *Raft) applyChSender() {
 // the client consumes new committed entries. Returns when commandReadyCh is
 // closed.
 func (rf *Raft) applyCommandChSender() {
-	//for range rf.commandReadyCh {
 	// Find which entries we have to apply.
 	var entries []LogEntry
 	rf.lockMutex()
@@ -606,41 +599,17 @@ func (rf *Raft) applyCommandChSender() {
 		rf.commandReadyCh <- struct{}{}
 		rf.unlockMutex()
 	}
-
-	//for i, entry := range entries {
-	//	rf.lockMutex()
-	//	if rf.lastApplied < savedLastApplied+i {
-	//		rf.commandReadyCh <- struct{}{}
-	//		rf.unlockMutex()
-	//		break
-	//	}
-	//	rf.unlockMutex()
-	//	applyMsg := ApplyMsg{
-	//		CommandValid:  true,
-	//		Command:       entry.Command,
-	//		CommandIndex:  savedLastApplied + i + 1,
-	//		SnapshotValid: false,
-	//		Snapshot:      nil,
-	//		SnapshotTerm:  0,
-	//		SnapshotIndex: 0,
-	//	}
-	//	rf.dLog("applyChSender Command: ApplyMsg=%+v", applyMsg)
-	//	rf.applyCh <- applyMsg
-	//}
-
-	//}
 }
 
 func (rf *Raft) applySnapshotChSender() {
-	//for range rf.snapshotReadyCh {
 	rf.lockMutex()
 	snapshot := rf.snapshot
 	snapshotIndex := rf.snapshotIndex
 	snapshotTerm := rf.snapshotTerm
-	//if rf.lastApplied < rf.snapshotIndex {
-	rf.lastApplied = rf.snapshotIndex
-	rf.dLog("applySnapshotChSender: rf.lastApplied is set to %d", rf.lastApplied)
-	//}
+	if rf.snapshotIndex >= 0 {
+		rf.lastApplied = rf.snapshotIndex
+		rf.dLog("applySnapshotChSender: rf.lastApplied is set to %d", rf.lastApplied)
+	}
 	rf.unlockMutex()
 	if snapshotIndex >= 0 {
 		rf.dLog("applyChSender Snapshot: snapshotIndex=%d, snapshotTerm=%d", snapshotIndex, snapshotTerm)
@@ -654,7 +623,6 @@ func (rf *Raft) applySnapshotChSender() {
 			SnapshotIndex: snapshotIndex,
 		}
 	}
-	//}
 }
 
 //

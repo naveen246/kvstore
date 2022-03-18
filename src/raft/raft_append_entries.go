@@ -63,16 +63,15 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		prevLogEntry, indexOutOfBoundsErr := rf.logEntryAtIndex(args.PrevLogIndex)
 		logOk := rf.logLength() > args.PrevLogIndex &&
 			(args.PrevLogIndex == -1 || args.PrevLogTerm == prevLogEntry.Term) && indexOutOfBoundsErr == nil
+		reply.AckSnapshotIndex = rf.snapshotIndex
 		if logOk {
 			rf.updateLog(args)
 			reply.Success = true
 			reply.AckMatchIndex = args.PrevLogIndex + len(args.Entries)
-			reply.AckSnapshotIndex = rf.snapshotIndex
 		} else {
 			reply.ConflictIndex, reply.ConflictTerm = rf.conflictIndexAndTerm(args)
 			reply.Success = false
 			reply.AckMatchIndex = -1
-			reply.AckSnapshotIndex = -1
 		}
 	}
 
@@ -261,7 +260,14 @@ func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply
 		rf.nextIndex[peerId] = reply.ConflictIndex
 	}
 	rf.dLog("onAppendEntriesReplyFailure - peer = %d, AppendEntriesReply = %+v, rf.nextIndex = %+v, rf.matchIndex = %+v, rf.snapshotIndex = %d, rf.log = %+v", peerId, reply, rf.nextIndex, rf.matchIndex, rf.snapshotIndex, rf.logEntries)
-	if reply.AckSnapshotIndex >= 0 && rf.nextIndex[peerId] <= reply.AckSnapshotIndex {
+	if reply.AckSnapshotIndex > rf.matchIndex[peerId] {
+		rf.matchIndex[peerId] = reply.AckSnapshotIndex
+		rf.nextIndex[peerId] = reply.AckSnapshotIndex + 1
+	}
+	if reply.AckSnapshotIndex+1 > rf.nextIndex[peerId] {
+		rf.nextIndex[peerId] = reply.AckSnapshotIndex + 1
+	}
+	if rf.snapshotIndex > reply.AckSnapshotIndex {
 		args := rf.getInstallSnapshotArgs(rf.snapshotIndex, rf.snapshotTerm, rf.snapshot, rf.currentTerm)
 		rf.dLog("Call rf.snapshotToPeer, peerId: %d, InstallSnapshotArgs: %+v, rf.matchIndex: %+v, rf.snapshotIndex: %d", peerId, InstallSnapshotArgsToStr(args), rf.matchIndex, rf.snapshotIndex)
 		rf.unlockMutex()

@@ -104,6 +104,9 @@ func (rf *Raft) snapshotToPeer(peerId int, args InstallSnapshotArgs) {
 }
 
 func (rf *Raft) onInstallSnapshotReply(peerId int, args InstallSnapshotArgs, reply InstallSnapshotReply) {
+	if rf.killed() {
+		return
+	}
 	rf.lockMutex()
 	defer rf.unlockMutex()
 	rf.dLog("onInstallSnapshotReply - peer: %d, InstallSnapshotArgs: %+v, InstallSnapshotReply: %+v, rf.currentTerm: %d, rf.matchIndex: %+v, rf.nextIndex: %+v", peerId, InstallSnapshotArgsToStr(args), reply, rf.currentTerm, rf.matchIndex, rf.nextIndex)
