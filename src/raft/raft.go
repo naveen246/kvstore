@@ -543,7 +543,7 @@ func (rf *Raft) applyChSender() {
 		if rf.killed() {
 			return
 		}
-		
+
 		select {
 		case <-rf.snapshotReadyCh:
 			rf.applySnapshotChSender()
@@ -575,16 +575,16 @@ func (rf *Raft) applyCommandChSender() {
 	rf.dLog("Before applyCh rf.lastApplied: %d, rf.commitIndex: %d, rf.snapshotIndex: %d, rf.logEntries: %+v", rf.lastApplied, rf.commitIndex, rf.snapshotIndex, rf.logEntries)
 	if rf.commitIndex > rf.lastApplied {
 		entries = rf.logEntriesBetween(rf.lastApplied+1, rf.commitIndex+1)
-		rf.lastApplied += 1
+		rf.lastApplied = rf.commitIndex
 		rf.dLog("applyCommandChSender: rf.lastApplied is set to %d", rf.lastApplied)
 	}
 	rf.unlockMutex()
 
-	if len(entries) > 0 {
+	for i, entry := range entries {
 		applyMsg := ApplyMsg{
 			CommandValid:  true,
-			Command:       entries[0].Command,
-			CommandIndex:  savedLastApplied + 1,
+			Command:       entry.Command,
+			CommandIndex:  savedLastApplied + i + 1,
 			SnapshotValid: false,
 			Snapshot:      nil,
 			SnapshotTerm:  0,
@@ -592,12 +592,6 @@ func (rf *Raft) applyCommandChSender() {
 		}
 		rf.dLog("applyChSender Command: ApplyMsg=%+v", applyMsg)
 		rf.applyCh <- applyMsg
-	}
-
-	if len(entries) > 1 {
-		rf.lockMutex()
-		rf.commandReadyCh <- struct{}{}
-		rf.unlockMutex()
 	}
 }
 
