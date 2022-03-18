@@ -113,10 +113,10 @@ type Raft struct {
 	// entries. It's passed in by the client during construction.
 	applyCh chan<- ApplyMsg
 
-	// newApplyReadyCh is an internal notification channel used by goroutines
+	// commandReadyCh is an internal notification channel used by goroutines
 	// that commit new entries to the logEntries to notify that these entries may be sent
 	// on applyCh.
-	newApplyReadyCh chan struct{}
+	commandReadyCh chan struct{}
 
 	// triggerAECh is an internal notification channel used to trigger
 	// sending new AEs to followers when interesting changes occurred.
@@ -321,7 +321,7 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.dLog("node dead")
 	rf.lockMutex()
-	close(rf.newApplyReadyCh)
+	close(rf.commandReadyCh)
 	//close(rf.applyCh)
 	rf.unlockMutex()
 }
@@ -494,13 +494,13 @@ func (rf *Raft) dLog(format string, args ...interface{}) {
 }
 
 // applyChSender is responsible for sending committed entries on
-// rf.applyCh. It watches newApplyReadyCh for notifications and calculates
+// rf.applyCh. It watches commandReadyCh for notifications and calculates
 // which new entries are ready to be sent. This method should run in a separate
 // background goroutine; rf.applyCh may be buffered and will limit how fast
-// the client consumes new committed entries. Returns when newApplyReadyCh is
+// the client consumes new committed entries. Returns when commandReadyCh is
 // closed.
 func (rf *Raft) applyChSender() {
-	for range rf.newApplyReadyCh {
+	for range rf.commandReadyCh {
 		// Find which entries we have to apply.
 		var entries []LogEntry
 		rf.lockMutex()
@@ -546,7 +546,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.applyCh = applyCh
-	rf.newApplyReadyCh = make(chan struct{}, 16)
+	rf.commandReadyCh = make(chan struct{}, 16)
 	rf.triggerAECh = make(chan struct{}, 1)
 
 	rf.currentTerm = 0

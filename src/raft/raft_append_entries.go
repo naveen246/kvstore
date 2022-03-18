@@ -100,7 +100,7 @@ func (rf *Raft) updateLog(args AppendEntriesArgs) {
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = intMin(args.LeaderCommit, rf.logLength()-1)
 		rf.dLog("... setting commitIndex=%d", rf.commitIndex)
-		rf.newApplyReadyCh <- struct{}{}
+		rf.commandReadyCh <- struct{}{}
 	}
 }
 
@@ -277,7 +277,7 @@ func (rf *Raft) onAppendEntriesReplySuccess(peerId int, reply AppendEntriesReply
 		// Commit index changed: the leader considers new entries to be
 		// committed. Send new entries on the commit channel to this
 		// leader's clients, and notify followers by sending them AEs.
-		rf.newApplyReadyCh <- struct{}{}
+		rf.commandReadyCh <- struct{}{}
 		rf.unlockMutex()
 		rf.triggerAECh <- struct{}{}
 		rf.dLog("Sent to triggerAECh channel")
