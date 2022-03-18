@@ -567,8 +567,8 @@ func (rf *Raft) applyCommandChSender() {
 	var entries []LogEntry
 	rf.lockMutex()
 	if rf.lastApplied < rf.snapshotIndex {
+		rf.snapshotReadyCh <- struct{}{}
 		rf.unlockMutex()
-		rf.applySnapshotChSender()
 		return
 	}
 	savedLastApplied := rf.lastApplied
