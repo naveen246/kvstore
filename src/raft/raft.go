@@ -302,7 +302,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	currentRole := rf.currentRole
 	rf.unlockMutex()
 	if !rf.killed() && err == nil && currentRole == Leader {
-		rf.leaderSendInstallSnapshot(index, logEntry.Term, snapshot, currentTerm)
+		rf.leaderSendInstallSnapshot(index, logEntry.Term, snapshot, currentTerm, rf.me)
 	}
 }
 

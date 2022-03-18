@@ -60,36 +60,22 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.persist()
 }
 
-func (rf *Raft) leaderSendInstallSnapshot(snapshotIndex int, snapshotTerm int, snapshot []byte, leaderCurrentTerm int) {
-	args := rf.getInstallSnapshotArgs(snapshotIndex, snapshotTerm, snapshot, leaderCurrentTerm)
+func (rf *Raft) leaderSendInstallSnapshot(snapshotIndex int, snapshotTerm int, snapshot []byte, leaderCurrentTerm int, leaderId int) {
+	args := rf.getInstallSnapshotArgs(snapshotIndex, snapshotTerm, snapshot, leaderCurrentTerm, leaderId)
 	for peerId := range rf.peers {
 		go rf.snapshotToPeer(peerId, args)
 	}
 }
 
-func (rf *Raft) getInstallSnapshotArgs(snapshotIndex int, snapshotTerm int, snapshot []byte, leaderCurrentTerm int) InstallSnapshotArgs {
+func (rf *Raft) getInstallSnapshotArgs(snapshotIndex int, snapshotTerm int, snapshot []byte, leaderCurrentTerm int,
+	leaderId int) InstallSnapshotArgs {
 	return InstallSnapshotArgs{
 		Term:              leaderCurrentTerm,
-		LeaderId:          rf.me,
+		LeaderId:          leaderId,
 		LastIncludedIndex: snapshotIndex,
 		LastIncludedTerm:  snapshotTerm,
 		Data:              snapshot,
 	}
-}
-
-func InstallSnapshotArgsToStr(args InstallSnapshotArgs) string {
-	s := struct {
-		Term              int
-		LeaderId          int
-		LastIncludedIndex int
-		LastIncludedTerm  int
-	}{
-		args.Term,
-		args.LeaderId,
-		args.LastIncludedIndex,
-		args.LastIncludedTerm,
-	}
-	return fmt.Sprintf("%+v", s)
 }
 
 func (rf *Raft) snapshotToPeer(peerId int, args InstallSnapshotArgs) {
@@ -110,7 +96,7 @@ func (rf *Raft) onInstallSnapshotReply(peerId int, args InstallSnapshotArgs, rep
 	rf.lockMutex()
 	defer rf.unlockMutex()
 	rf.dLog("onInstallSnapshotReply - peer: %d, InstallSnapshotArgs: %+v, InstallSnapshotReply: %+v, rf.currentTerm: %d, rf.matchIndex: %+v, rf.nextIndex: %+v", peerId, InstallSnapshotArgsToStr(args), reply, rf.currentTerm, rf.matchIndex, rf.nextIndex)
-	if reply.Term > rf.currentTerm {
+	if reply.Term > rf.currentTerm || rf.currentRole != Leader {
 		rf.becomeFollower(reply.Term)
 		return
 	}
@@ -122,4 +108,13 @@ func (rf *Raft) onInstallSnapshotReply(peerId int, args InstallSnapshotArgs, rep
 		rf.nextIndex[peerId] = reply.AckSnapshotIndex + 1
 	}
 	rf.dLog("onInstallSnapshotReply - peer: %d, InstallSnapshotArgs: %+v, InstallSnapshotReply: %+v, rf.matchIndex: %+v, rf.nextIndex: %+v", peerId, InstallSnapshotArgsToStr(args), reply, rf.matchIndex, rf.nextIndex)
+}
+
+func InstallSnapshotArgsToStr(args InstallSnapshotArgs) string {
+	return fmt.Sprintf("%+v", InstallSnapshotArgs{
+		Term:              args.Term,
+		LeaderId:          args.LeaderId,
+		LastIncludedIndex: args.LastIncludedIndex,
+		LastIncludedTerm:  args.LastIncludedTerm,
+	})
 }

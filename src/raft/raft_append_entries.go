@@ -267,8 +267,8 @@ func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply
 	if reply.AckSnapshotIndex+1 > rf.nextIndex[peerId] {
 		rf.nextIndex[peerId] = reply.AckSnapshotIndex + 1
 	}
-	if rf.snapshotIndex > reply.AckSnapshotIndex {
-		args := rf.getInstallSnapshotArgs(rf.snapshotIndex, rf.snapshotTerm, rf.snapshot, rf.currentTerm)
+	if rf.snapshotIndex > reply.AckSnapshotIndex && rf.currentRole == Leader {
+		args := rf.getInstallSnapshotArgs(rf.snapshotIndex, rf.snapshotTerm, rf.snapshot, rf.currentTerm, rf.me)
 		rf.dLog("Call rf.snapshotToPeer, peerId: %d, InstallSnapshotArgs: %+v, rf.matchIndex: %+v, rf.snapshotIndex: %d", peerId, InstallSnapshotArgsToStr(args), rf.matchIndex, rf.snapshotIndex)
 		rf.unlockMutex()
 		go rf.snapshotToPeer(peerId, args)
