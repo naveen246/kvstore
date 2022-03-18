@@ -211,7 +211,7 @@ func (rf *Raft) persist() {
 
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
-	rf.dLog("persist(): time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
+	rf.dLog("persist(): time elapsed since electionResetEvent - %+v", time.Since(rf.electionResetEvent))
 }
 
 //
@@ -285,13 +285,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.lockMutex()
 	if rf.currentRole == Leader && !rf.killed() {
-		rf.dLog("Start agreement on next command: %v\t logEntries: %v at node %v", command, rf.logEntries, rf.me)
+		rf.dLog("Start agreement on next command: %+v\t logEntries: %+v at node %+v", command, rf.logEntries, rf.me)
 		rf.logEntries = append(rf.logEntries, LogEntry{
 			Command: command,
 			Term:    rf.currentTerm,
 		})
 		rf.persist()
-		rf.dLog("... logEntries=%v", rf.logEntries)
+		rf.dLog("... logEntries=%+v", rf.logEntries)
 		index = rf.logLength() - 1
 		term = rf.currentTerm
 		isLeader = true
@@ -344,7 +344,7 @@ func (rf *Raft) ticker() {
 	rf.lockMutex()
 	termStarted := rf.currentTerm
 	rf.unlockMutex()
-	rf.dLog("election timer started (%v), term=%d", timeoutDuration, termStarted)
+	rf.dLog("election timer started (%+v), term=%d", timeoutDuration, termStarted)
 
 	// This loops until either:
 	// - we discover the election timer is no longer needed, or
@@ -371,7 +371,7 @@ func (rf *Raft) ticker() {
 		// someone for the duration of the timeout.
 		elapsed := time.Since(rf.electionResetEvent)
 		if elapsed >= timeoutDuration {
-			rf.dLog("elapsed: %v, timeoutDuration: %v, electionResetEvent: %v", elapsed, timeoutDuration, rf.electionResetEvent)
+			rf.dLog("elapsed: %+v, timeoutDuration: %+v, electionResetEvent: %+v", elapsed, timeoutDuration, rf.electionResetEvent)
 			rf.startElection()
 			rf.unlockMutex()
 			return
@@ -382,14 +382,14 @@ func (rf *Raft) ticker() {
 
 // Expects rf.mu to be locked.
 func (rf *Raft) becomeCandidate() int {
-	rf.dLog("startElection currentRole: %v", rf.currentRole)
+	rf.dLog("startElection currentRole: %+v", rf.currentRole)
 	rf.currentTerm += 1
 	rf.currentRole = Candidate
 	rf.votedFor = rf.me
 	rf.electionResetEvent = time.Now()
 	rf.persist()
 	rf.dLog("electionResetEvent in startElection")
-	rf.dLog("becomes Candidate (currentTerm=%d); logEntries=%v", rf.currentTerm, rf.logEntries)
+	rf.dLog("becomes Candidate (currentTerm=%d); logEntries=%+v", rf.currentTerm, rf.logEntries)
 	return rf.currentTerm
 }
 
@@ -397,7 +397,7 @@ func (rf *Raft) becomeCandidate() int {
 // Expects rf.mu to be locked.
 func (rf *Raft) becomeFollower(term int) {
 	rf.currentRole = Follower
-	rf.dLog("becomes Follower with term=%d; logEntries=%v", term, rf.logEntries)
+	rf.dLog("becomes Follower with term=%d; logEntries=%+v", term, rf.logEntries)
 	rf.currentTerm = term
 	rf.votedFor = -1
 	rf.electionResetEvent = time.Now()
@@ -414,7 +414,7 @@ func (rf *Raft) becomeLeader() {
 		rf.nextIndex[peerId] = rf.logLength()
 		rf.matchIndex[peerId] = -1
 	}
-	rf.dLog("becomes Leader; term=%d, nextIndex=%v, matchIndex=%v; logEntries=%v", rf.currentTerm, rf.nextIndex, rf.matchIndex, rf.logEntries)
+	rf.dLog("becomes Leader; term=%d, nextIndex=%+v, matchIndex=%+v; logEntries=%+v", rf.currentTerm, rf.nextIndex, rf.matchIndex, rf.logEntries)
 }
 
 // startLeader switches node into a leader state and begins process of heartbeats.
@@ -466,7 +466,7 @@ func (rf *Raft) startLeader() {
 					rf.unlockMutex()
 					return
 				}
-				rf.dLog("Call leaderSendAEs inside heartbeat: time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
+				rf.dLog("Call leaderSendAEs inside heartbeat: time elapsed since electionResetEvent - %+v", time.Since(rf.electionResetEvent))
 				currentTerm := rf.currentTerm
 				rf.unlockMutex()
 				rf.leaderSendAEs(currentTerm)
@@ -488,7 +488,7 @@ func getGID() uint64 {
 // dLog logs a debugging message if DebugMode is true.
 func (rf *Raft) dLog(format string, args ...interface{}) {
 	if DebugMode {
-		format = fmt.Sprintf("[Goroutine: %v]\t\t[%d]\t", getGID(), rf.me) + format
+		format = fmt.Sprintf("[Goroutine: %+v]\t\t[%d]\t", getGID(), rf.me) + format
 		log.Printf(format, args...)
 	}
 }
@@ -511,7 +511,7 @@ func (rf *Raft) applyChSender() {
 			rf.lastApplied = rf.commitIndex
 		}
 		rf.unlockMutex()
-		rf.dLog("applyChSender entries=%v, savedLastApplied=%d", entries, savedLastApplied)
+		rf.dLog("applyChSender entries=%+v, savedLastApplied=%d", entries, savedLastApplied)
 
 		for i, entry := range entries {
 			rf.applyCh <- ApplyMsg{

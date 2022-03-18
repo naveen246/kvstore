@@ -37,7 +37,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		return
 	}
 	rf.dLog("AppendEntries: %+v", args)
-	rf.dLog("AppendEntries(): time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
+	rf.dLog("AppendEntries(): time elapsed since electionResetEvent - %+v", time.Since(rf.electionResetEvent))
 
 	if args.Term > rf.currentTerm || (args.Term == rf.currentTerm && rf.currentRole == Candidate) {
 		rf.dLog("... term out of date in AppendEntries")
@@ -65,7 +65,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 	reply.Term = rf.currentTerm
 	rf.persist()
 	rf.dLog("AppendEntries reply: %+v", *reply)
-	rf.dLog("time elapsed since electionResetEvent - %v", time.Since(rf.electionResetEvent))
+	rf.dLog("time elapsed since electionResetEvent - %+v", time.Since(rf.electionResetEvent))
 }
 
 func (rf *Raft) updateLog(args AppendEntriesArgs) {
@@ -91,9 +91,9 @@ func (rf *Raft) updateLog(args AppendEntriesArgs) {
 	// - newEntriesIndex points at the end of Entries, or an index where the
 	//   term mismatches with the corresponding logEntries entry
 	if newEntriesIndex < len(args.Entries) {
-		rf.dLog("... inserting entries %v from index %d", args.Entries[newEntriesIndex:], logInsertIndex)
+		rf.dLog("... inserting entries %+v from index %d", args.Entries[newEntriesIndex:], logInsertIndex)
 		rf.logEntries = append(rf.logEntriesBetween(0, logInsertIndex), args.Entries[newEntriesIndex:]...)
-		rf.dLog("... logEntries is now: %v", rf.logEntries)
+		rf.dLog("... logEntries is now: %+v", rf.logEntries)
 	}
 
 	// Set commitIndex
@@ -161,10 +161,10 @@ func (rf *Raft) replicateLog(peerId int, leaderCurrentTerm int) {
 	if rf.killed() {
 		return
 	}
-	rf.dLog("sending AppendEntries to %v: ni=%d, args=%v", peerId, ni, args)
+	rf.dLog("sending AppendEntries to %+v: ni=%d, args=%+v", peerId, ni, args)
 	var reply AppendEntriesReply
 	if len(entries) > 0 {
-		rf.dLog("Calling rf.sendAppendEntries with %d entries: %v", len(entries), entries)
+		rf.dLog("Calling rf.sendAppendEntries with %d entries: %+v", len(entries), entries)
 	}
 	ok := rf.sendAppendEntries(peerId, args, &reply)
 	if ok {
@@ -206,7 +206,7 @@ func (rf *Raft) onAppendEntriesReply(peerId int, reply AppendEntriesReply, saved
 	}
 	isLeader := rf.currentRole == Leader
 	rf.unlockMutex()
-	rf.dLog("currentRole: %v, reply.term: %v", Leader.String(), reply.Term)
+	rf.dLog("currentRole: %+v, reply.term: %+v", Leader.String(), reply.Term)
 	if reply.Term == savedCurrentTerm && isLeader {
 		if reply.Success {
 			rf.onAppendEntriesReplySuccess(peerId, reply)
@@ -270,7 +270,7 @@ func (rf *Raft) onAppendEntriesReplySuccess(peerId int, reply AppendEntriesReply
 		}
 	}
 	rf.persist()
-	rf.dLog("AppendEntries reply from %d success: nextIndex := %v, matchIndex := %v; commitIndex := %d", peerId, rf.nextIndex, rf.matchIndex, rf.commitIndex)
+	rf.dLog("AppendEntries reply from %d success: nextIndex := %+v, matchIndex := %+v; commitIndex := %d", peerId, rf.nextIndex, rf.matchIndex, rf.commitIndex)
 
 	if rf.commitIndex != savedCommitIndex {
 		rf.dLog("leader sets commitIndex := %d", rf.commitIndex)
