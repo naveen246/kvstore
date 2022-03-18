@@ -322,7 +322,6 @@ func (rf *Raft) Kill() {
 	rf.dLog("node dead")
 	rf.lockMutex()
 	close(rf.commandReadyCh)
-	//close(rf.applyCh)
 	rf.unlockMutex()
 }
 
