@@ -543,21 +543,12 @@ func (rf *Raft) applyChSender() {
 		if rf.killed() {
 			return
 		}
-
+		
 		select {
 		case <-rf.snapshotReadyCh:
 			rf.applySnapshotChSender()
-			continue
-		default:
-		}
-
-		select {
-		case <-rf.snapshotReadyCh:
-			rf.applySnapshotChSender()
-			continue
 		case <-rf.commandReadyCh:
 			rf.applyCommandChSender()
-			continue
 		}
 	}
 }
