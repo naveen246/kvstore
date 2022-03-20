@@ -171,7 +171,18 @@ func (rf *Raft) replicateLog(peerId int, leaderCurrentTerm int) {
 	rf.dLog("Created goroutine from leaderSendAEs for peerId:%d\n", peerId)
 	rf.lockMutex()
 	rf.dLog("reading nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
-	args := rf.getAppendEntriesArgs(peerId, leaderCurrentTerm)
+	peerNextIndex := rf.nextIndex[peerId]
+	// have the leader send an InstallSnapshot RPC if it doesn't have the log entries required to bring a follower up to date.
+	if peerNextIndex <= rf.snapshotIndex {
+		snapshotIndex := rf.snapshotIndex
+		snapshotTerm := rf.snapshotTerm
+		snapshot := rf.snapshot
+		rf.unlockMutex()
+		go rf.snapshotToPeer(peerId, snapshotIndex, snapshotTerm, snapshot)
+		rf.lockMutex()
+		peerNextIndex = rf.snapshotIndex + 1
+	}
+	args := rf.getAppendEntriesArgs(peerId, peerNextIndex, leaderCurrentTerm)
 	rf.unlockMutex()
 
 	if rf.killed() {
@@ -191,19 +202,9 @@ func (rf *Raft) replicateLog(peerId int, leaderCurrentTerm int) {
 }
 
 // Expects rf.mu to be locked.
-func (rf *Raft) getAppendEntriesArgs(peerId int, savedCurrentTerm int) AppendEntriesArgs {
-	ni := rf.nextIndex[peerId]
-	if ni <= rf.snapshotIndex {
-		snapshotIndex := rf.snapshotIndex
-		snapshotTerm := rf.snapshotTerm
-		snapshot := rf.snapshot
-		rf.unlockMutex()
-		go rf.snapshotToPeer(peerId, snapshotIndex, snapshotTerm, snapshot)
-		rf.lockMutex()
-		ni = rf.snapshotIndex + 1
-	}
-	entries := rf.logEntriesBetween(ni, rf.logLength())
-	prevLogIndex := ni - 1
+func (rf *Raft) getAppendEntriesArgs(peerId int, peerNextIndex int, savedCurrentTerm int) AppendEntriesArgs {
+	entries := rf.logEntriesBetween(peerNextIndex, rf.logLength())
+	prevLogIndex := peerNextIndex - 1
 	prevLogTerm := -1
 	if prevLogIndex >= 0 {
 		prevLogEntry, _ := rf.logEntryAtIndex(prevLogIndex)
