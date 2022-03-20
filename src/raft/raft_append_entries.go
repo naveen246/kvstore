@@ -20,7 +20,6 @@ type AppendEntriesReply struct {
 	AckSnapshotIndex int
 
 	ConflictIndex int
-	ConflictTerm  int
 }
 
 func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -69,7 +68,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 			reply.Success = true
 			reply.AckMatchIndex = args.PrevLogIndex + len(args.Entries)
 		} else {
-			reply.ConflictIndex, reply.ConflictTerm = rf.conflictIndexAndTerm(args)
+			reply.ConflictIndex = rf.conflictIndex(args)
 			reply.Success = false
 			reply.AckMatchIndex = -1
 		}
@@ -118,18 +117,21 @@ func (rf *Raft) updateLog(args AppendEntriesArgs) {
 	}
 }
 
-func (rf *Raft) conflictIndexAndTerm(args AppendEntriesArgs) (int, int) {
+//When rejecting an AppendEntries request, the follower
+//can include the first index of the term for which there is a conflicting entry. With this information, the
+//leader can decrement nextIndex to bypass all of the conflicting entries in that term; one AppendEntries RPC will
+//be required for each term with conflicting entries, rather
+//than one RPC per entry.
+func (rf *Raft) conflictIndex(args AppendEntriesArgs) int {
 	// No match for PrevLogIndex/PrevLogTerm. Populate
-	// ConflictIndex/ConflictTerm to help the leader bring us up to date
-	// quickly.
-	var conflictIndex, conflictTerm int
+	// ConflictIndex to help the leader bring us up to date quickly.
+	var conflictIndex int
 	if args.PrevLogIndex >= rf.logLength() {
 		conflictIndex = rf.logLength()
-		conflictTerm = -1
 	} else {
 		// PrevLogIndex points within our logEntries, but PrevLogTerm doesn't match rf.logEntries[PrevLogIndex].
 		prevLogEntry, _ := rf.logEntryAtIndex(args.PrevLogIndex)
-		conflictTerm = prevLogEntry.Term
+		conflictTerm := prevLogEntry.Term
 		var i int
 		for i = args.PrevLogIndex - 1; i > rf.snapshotIndex; i-- {
 			logEntry, _ := rf.logEntryAtIndex(i)
@@ -139,11 +141,7 @@ func (rf *Raft) conflictIndexAndTerm(args AppendEntriesArgs) (int, int) {
 		}
 		conflictIndex = i + 1
 	}
-	if conflictIndex <= rf.snapshotIndex {
-		conflictIndex = rf.snapshotIndex + 1
-		conflictTerm = rf.snapshotTerm
-	}
-	return conflictIndex, conflictTerm
+	return conflictIndex
 }
 
 func intMin(a, b int) int {
@@ -242,29 +240,10 @@ func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply
 		return
 	}
 	rf.lockMutex()
-	if reply.ConflictTerm >= 0 {
-		lastIndexOfTerm := -1
-		for i := rf.logLength() - 1; i > rf.snapshotIndex; i-- {
-			logEntry, _ := rf.logEntryAtIndex(i)
-			if logEntry.Term == reply.ConflictTerm {
-				lastIndexOfTerm = i
-				break
-			}
-		}
-		if lastIndexOfTerm >= 0 {
-			rf.nextIndex[peerId] = lastIndexOfTerm + 1
-		} else {
-			rf.nextIndex[peerId] = reply.ConflictIndex
-		}
-	} else {
-		rf.nextIndex[peerId] = reply.ConflictIndex
-	}
+	rf.nextIndex[peerId] = reply.ConflictIndex
 	rf.dLog("onAppendEntriesReplyFailure - peer = %d, AppendEntriesReply = %+v, rf.nextIndex = %+v, rf.matchIndex = %+v, rf.snapshotIndex = %d, rf.log = %+v", peerId, reply, rf.nextIndex, rf.matchIndex, rf.snapshotIndex, rf.logEntries)
 	if reply.AckSnapshotIndex > rf.matchIndex[peerId] {
 		rf.matchIndex[peerId] = reply.AckSnapshotIndex
-		rf.nextIndex[peerId] = reply.AckSnapshotIndex + 1
-	}
-	if reply.AckSnapshotIndex+1 > rf.nextIndex[peerId] {
 		rf.nextIndex[peerId] = reply.AckSnapshotIndex + 1
 	}
 	if rf.snapshotIndex > reply.AckSnapshotIndex && rf.currentRole == Leader {
