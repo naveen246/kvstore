@@ -193,6 +193,14 @@ func (rf *Raft) replicateLog(peerId int, leaderCurrentTerm int) {
 // Expects rf.mu to be locked.
 func (rf *Raft) getAppendEntriesArgs(peerId int, savedCurrentTerm int) AppendEntriesArgs {
 	ni := rf.nextIndex[peerId]
+	if ni <= rf.snapshotIndex {
+		args := rf.getInstallSnapshotArgs(rf.snapshotIndex, rf.snapshotTerm, rf.snapshot, rf.currentTerm, rf.me)
+		rf.dLog("Call rf.snapshotToPeer, peerId: %d, InstallSnapshotArgs: %+v, rf.matchIndex: %+v, rf.snapshotIndex: %d", peerId, InstallSnapshotArgsToStr(args), rf.matchIndex, rf.snapshotIndex)
+		rf.unlockMutex()
+		go rf.snapshotToPeer(peerId, args)
+		rf.lockMutex()
+		ni = rf.snapshotIndex + 1
+	}
 	entries := rf.logEntriesBetween(ni, rf.logLength())
 	prevLogIndex := ni - 1
 	prevLogTerm := -1
@@ -246,6 +254,9 @@ func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply
 		rf.matchIndex[peerId] = reply.AckSnapshotIndex
 		rf.nextIndex[peerId] = reply.AckSnapshotIndex + 1
 	}
+	if reply.AckSnapshotIndex+1 > rf.nextIndex[peerId] {
+		rf.nextIndex[peerId] = reply.AckSnapshotIndex + 1
+	}
 	if rf.snapshotIndex > reply.AckSnapshotIndex && rf.currentRole == Leader {
 		args := rf.getInstallSnapshotArgs(rf.snapshotIndex, rf.snapshotTerm, rf.snapshot, rf.currentTerm, rf.me)
 		rf.dLog("Call rf.snapshotToPeer, peerId: %d, InstallSnapshotArgs: %+v, rf.matchIndex: %+v, rf.snapshotIndex: %d", peerId, InstallSnapshotArgsToStr(args), rf.matchIndex, rf.snapshotIndex)
@@ -266,9 +277,9 @@ func (rf *Raft) onAppendEntriesReplySuccess(peerId int, reply AppendEntriesReply
 		return
 	}
 	if reply.AckMatchIndex >= rf.matchIndex[peerId] {
+		rf.matchIndex[peerId] = reply.AckMatchIndex
 		rf.nextIndex[peerId] = reply.AckMatchIndex + 1
 		rf.dLog("On AE reply success nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
-		rf.matchIndex[peerId] = reply.AckMatchIndex
 	} else if rf.nextIndex[peerId] > reply.AckSnapshotIndex+1 {
 		rf.dLog("decreasing nextIndex, reply from peer: %d is %+v, rf.matchIndex: %d", peerId, reply, rf.matchIndex[peerId])
 		rf.nextIndex[peerId] -= 1
