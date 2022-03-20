@@ -194,10 +194,11 @@ func (rf *Raft) replicateLog(peerId int, leaderCurrentTerm int) {
 func (rf *Raft) getAppendEntriesArgs(peerId int, savedCurrentTerm int) AppendEntriesArgs {
 	ni := rf.nextIndex[peerId]
 	if ni <= rf.snapshotIndex {
-		args := rf.getInstallSnapshotArgs(rf.snapshotIndex, rf.snapshotTerm, rf.snapshot, rf.currentTerm, rf.me)
-		rf.dLog("Call rf.snapshotToPeer, peerId: %d, InstallSnapshotArgs: %+v, rf.matchIndex: %+v, rf.snapshotIndex: %d", peerId, InstallSnapshotArgsToStr(args), rf.matchIndex, rf.snapshotIndex)
+		snapshotIndex := rf.snapshotIndex
+		snapshotTerm := rf.snapshotTerm
+		snapshot := rf.snapshot
 		rf.unlockMutex()
-		go rf.snapshotToPeer(peerId, args)
+		go rf.snapshotToPeer(peerId, snapshotIndex, snapshotTerm, snapshot)
 		rf.lockMutex()
 		ni = rf.snapshotIndex + 1
 	}
@@ -258,10 +259,11 @@ func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply
 		rf.nextIndex[peerId] = reply.AckSnapshotIndex + 1
 	}
 	if rf.snapshotIndex > reply.AckSnapshotIndex && rf.currentRole == Leader {
-		args := rf.getInstallSnapshotArgs(rf.snapshotIndex, rf.snapshotTerm, rf.snapshot, rf.currentTerm, rf.me)
-		rf.dLog("Call rf.snapshotToPeer, peerId: %d, InstallSnapshotArgs: %+v, rf.matchIndex: %+v, rf.snapshotIndex: %d", peerId, InstallSnapshotArgsToStr(args), rf.matchIndex, rf.snapshotIndex)
+		snapshotIndex := rf.snapshotIndex
+		snapshotTerm := rf.snapshotTerm
+		snapshot := rf.snapshot
 		rf.unlockMutex()
-		go rf.snapshotToPeer(peerId, args)
+		go rf.snapshotToPeer(peerId, snapshotIndex, snapshotTerm, snapshot)
 		return
 	}
 	rf.unlockMutex()

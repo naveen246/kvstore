@@ -298,11 +298,12 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.lockMutex()
 	logEntry, err := rf.logEntryAtIndex(index)
-	currentTerm := rf.currentTerm
 	currentRole := rf.currentRole
 	rf.unlockMutex()
 	if !rf.killed() && err == nil && currentRole == Leader {
-		rf.leaderSendInstallSnapshot(index, logEntry.Term, snapshot, currentTerm, rf.me)
+		for peerId := range rf.peers {
+			go rf.snapshotToPeer(peerId, index, logEntry.Term, snapshot)
+		}
 	}
 }
 

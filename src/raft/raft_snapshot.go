@@ -60,25 +60,17 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.persist()
 }
 
-func (rf *Raft) leaderSendInstallSnapshot(snapshotIndex int, snapshotTerm int, snapshot []byte, leaderCurrentTerm int, leaderId int) {
-	args := rf.getInstallSnapshotArgs(snapshotIndex, snapshotTerm, snapshot, leaderCurrentTerm, leaderId)
-	for peerId := range rf.peers {
-		go rf.snapshotToPeer(peerId, args)
-	}
-}
-
-func (rf *Raft) getInstallSnapshotArgs(snapshotIndex int, snapshotTerm int, snapshot []byte, leaderCurrentTerm int,
-	leaderId int) InstallSnapshotArgs {
-	return InstallSnapshotArgs{
-		Term:              leaderCurrentTerm,
-		LeaderId:          leaderId,
+func (rf *Raft) snapshotToPeer(peerId int, snapshotIndex int, snapshotTerm int, snapshot []byte) {
+	rf.lockMutex()
+	args := InstallSnapshotArgs{
+		Term:              rf.currentTerm,
+		LeaderId:          rf.me,
 		LastIncludedIndex: snapshotIndex,
 		LastIncludedTerm:  snapshotTerm,
 		Data:              snapshot,
 	}
-}
-
-func (rf *Raft) snapshotToPeer(peerId int, args InstallSnapshotArgs) {
+	rf.dLog("rf.snapshotToPeer, peerId: %d, InstallSnapshotArgs: %+v, rf.matchIndex: %+v, rf.snapshotIndex: %d", peerId, InstallSnapshotArgsToStr(args), rf.matchIndex, rf.snapshotIndex)
+	rf.unlockMutex()
 	reply := InstallSnapshotReply{
 		Term: -1,
 	}
