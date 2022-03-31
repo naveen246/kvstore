@@ -119,7 +119,7 @@ func (rf *Raft) updateLog(args AppendEntriesArgs) {
 
 //When rejecting an AppendEntries request, the follower
 //can include the first index of the term for which there is a conflicting entry. With this information, the
-//leader can decrement nextIndex to bypass all of the conflicting entries in that term; one AppendEntries RPC will
+//leader can decrement nextIndex to bypass all the conflicting entries in that term; one AppendEntries RPC will
 //be required for each term with conflicting entries, rather
 //than one RPC per entry.
 func (rf *Raft) conflictIndex(args AppendEntriesArgs) int {
@@ -182,7 +182,7 @@ func (rf *Raft) replicateLog(peerId int, leaderCurrentTerm int) {
 		rf.lockMutex()
 		peerNextIndex = rf.snapshotIndex + 1
 	}
-	args := rf.getAppendEntriesArgs(peerId, peerNextIndex, leaderCurrentTerm)
+	args := rf.getAppendEntriesArgs(peerNextIndex, leaderCurrentTerm)
 	rf.unlockMutex()
 
 	if rf.killed() {
@@ -202,7 +202,7 @@ func (rf *Raft) replicateLog(peerId int, leaderCurrentTerm int) {
 }
 
 // Expects rf.mu to be locked.
-func (rf *Raft) getAppendEntriesArgs(peerId int, peerNextIndex int, savedCurrentTerm int) AppendEntriesArgs {
+func (rf *Raft) getAppendEntriesArgs(peerNextIndex int, savedCurrentTerm int) AppendEntriesArgs {
 	entries := rf.logEntriesBetween(peerNextIndex, rf.logLength())
 	prevLogIndex := peerNextIndex - 1
 	prevLogTerm := -1
