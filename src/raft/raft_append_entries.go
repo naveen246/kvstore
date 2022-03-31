@@ -105,7 +105,7 @@ func (rf *Raft) updateLog(args AppendEntriesArgs) {
 
 //When rejecting an AppendEntries request, the follower
 //can include the first index of the term for which there is a conflicting entry. With this information, the
-//leader can decrement nextIndex to bypass all of the conflicting entries in that term; one AppendEntries RPC will
+//leader can decrement nextIndex to bypass all the conflicting entries in that term; one AppendEntries RPC will
 //be required for each term with conflicting entries, rather
 //than one RPC per entry.
 func (rf *Raft) conflictIndex(args AppendEntriesArgs) int {
