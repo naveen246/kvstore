@@ -1,13 +1,19 @@
 package kvraft
 
-import "6.824/labrpc"
+import (
+	"6.824/labrpc"
+	"sync"
+)
 import "crypto/rand"
 import "math/big"
-
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	mu        sync.Mutex
+	clientId  int64
+	requestId int64
+	leaderId  int
 }
 
 func nrand() int64 {
@@ -21,10 +27,13 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.clientId = nrand()
+	ck.requestId = 0
+	ck.leaderId = 0
 	return ck
 }
 
-//
+// Get
 // fetch the current value for a key.
 // returns "" if the key does not exist.
 // keeps trying forever in the face of all other errors.
@@ -37,12 +46,40 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	ck.mu.Lock()
+	clientId := ck.clientId
+	leaderId := ck.leaderId
+	requestId := ck.requestId
+	ck.requestId += 1
+	ck.mu.Unlock()
+
+	args := GetArgs{
+		Key:       key,
+		ClientId:  clientId,
+		RequestId: requestId,
+	}
+
+	value := ""
+	id := leaderId
+	for {
+		reply := GetReply{}
+		ok := ck.servers[id].Call("KVServer.Get", &args, &reply)
+		if ok && reply.Err != ErrWrongLeader {
+			if reply.Err == OK {
+				value = reply.Value
+			}
+			break
+		}
+		id = (id + 1) % len(ck.servers)
+	}
+	ck.mu.Lock()
+	ck.leaderId = id
+	ck.mu.Unlock()
+	return value
 }
 
-//
+// PutAppend
 // shared by Put and Append.
 //
 // you can send an RPC with code like this:
@@ -54,6 +91,33 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	ck.mu.Lock()
+	clientId := ck.clientId
+	leaderId := ck.leaderId
+	requestId := ck.requestId
+	ck.requestId += 1
+	ck.mu.Unlock()
+
+	args := PutAppendArgs{
+		Key:       key,
+		Value:     value,
+		Op:        op,
+		ClientId:  clientId,
+		RequestId: requestId,
+	}
+
+	id := leaderId
+	for {
+		reply := PutAppendReply{}
+		ok := ck.servers[id].Call("KVServer.PutAppend", &args, &reply)
+		if ok && reply.Err != ErrWrongLeader {
+			break
+		}
+		id = (id + 1) % len(ck.servers)
+	}
+	ck.mu.Lock()
+	ck.leaderId = id
+	ck.mu.Unlock()
 }
 
 func (ck *Clerk) Put(key string, value string) {
