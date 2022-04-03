@@ -42,9 +42,11 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	store          map[string]string
+	store map[string]string
+	// Maps Raft log index to channel that holds command committed to Raft Log at that index
 	committedCmdCh map[int]chan Op
-	lastApplied    map[int64]int64
+	// Maps clientId to requestId of command that was last applied to KV
+	lastAppliedToKV map[int64]int64
 }
 
 //
@@ -59,14 +61,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		RequestId: args.RequestId,
 	}
 
-	ok, appliedCmd := kv.appendCmdToLog(cmd)
+	ok, committedCmd := kv.commitCmdToLog(cmd)
 	if !ok {
 		reply.Err = ErrWrongLeader
 		return
 	}
 
 	reply.Err = OK
-	reply.Value = appliedCmd.Value
+	reply.Value = committedCmd.Value
 }
 
 //
@@ -82,7 +84,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		RequestId: args.RequestId,
 	}
 
-	ok, _ := kv.appendCmdToLog(cmd)
+	ok, _ := kv.commitCmdToLog(cmd)
 	if !ok {
 		reply.Err = ErrWrongLeader
 		return
@@ -94,7 +96,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 //
 // send the op log to Raft library and wait for it to be applied
 //
-func (kv *KVServer) appendCmdToLog(cmd Op) (bool, Op) {
+func (kv *KVServer) commitCmdToLog(cmd Op) (bool, Op) {
 	index, _, isLeader := kv.rf.Start(cmd)
 
 	if !isLeader {
@@ -109,8 +111,8 @@ func (kv *KVServer) appendCmdToLog(cmd Op) (bool, Op) {
 	kv.mu.Unlock()
 
 	select {
-	case appliedCmd := <-kv.committedCmdCh[index]:
-		return kv.isSameCmd(cmd, appliedCmd), appliedCmd
+	case committedCmd := <-kv.committedCmdCh[index]:
+		return kv.isSameCmd(cmd, committedCmd), committedCmd
 	case <-time.After(600 * time.Millisecond):
 		return false, cmd
 	}
@@ -128,14 +130,14 @@ func (kv *KVServer) isSameCmd(issued Op, applied Op) bool {
 // background loop to receive the logs committed by the Raft
 // library and apply them to the kv server state machine
 //
-func (kv *KVServer) applyToKVStore() {
+func (kv *KVServer) run() {
 	for {
 		msg := <-kv.applyCh
 		if msg.CommandValid {
 			index := msg.CommandIndex
 			cmd := msg.Command.(Op)
 			kv.mu.Lock()
-			kv.applyCmdToKVStore(&cmd, index)
+			kv.applyCmdToKV(&cmd, index)
 			kv.pushCommittedCmdToCh(cmd, index)
 			kv.mu.Unlock()
 		} else if msg.SnapshotValid {
@@ -144,14 +146,14 @@ func (kv *KVServer) applyToKVStore() {
 	}
 }
 
-func (kv *KVServer) applyCmdToKVStore(cmd *Op, index int) {
+func (kv *KVServer) applyCmdToKV(cmd *Op, index int) {
 	if cmd.Type == "Get" {
-		kv.applyToStateMachine(cmd)
+		kv.applyToKV(cmd)
 	} else {
-		lastId, ok := kv.lastApplied[cmd.ClientId]
+		lastId, ok := kv.lastAppliedToKV[cmd.ClientId]
 		if !ok || cmd.RequestId > lastId {
-			kv.applyToStateMachine(cmd)
-			kv.lastApplied[cmd.ClientId] = cmd.RequestId
+			kv.applyToKV(cmd)
+			kv.lastAppliedToKV[cmd.ClientId] = cmd.RequestId
 		}
 	}
 }
@@ -168,7 +170,7 @@ func (kv *KVServer) pushCommittedCmdToCh(cmd Op, index int) {
 // applied the command to the state machine
 // lock must be held before calling this
 //
-func (kv *KVServer) applyToStateMachine(cmd *Op) {
+func (kv *KVServer) applyToKV(cmd *Op) {
 	switch cmd.Type {
 	case "Get":
 		cmd.Value = kv.store[cmd.Key]
@@ -228,10 +230,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 	kv.store = make(map[string]string)
 	kv.committedCmdCh = make(map[int]chan Op)
-	kv.lastApplied = make(map[int64]int64)
+	kv.lastAppliedToKV = make(map[int64]int64)
 
 	// You may need initialization code here.
-	go kv.applyToKVStore()
+	go kv.run()
 
 	return kv
 }
