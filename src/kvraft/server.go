@@ -104,14 +104,15 @@ func (kv *KVServer) commitCmdToLog(cmd Op) (bool, Op) {
 	}
 
 	kv.mu.Lock()
-	_, ok := kv.committedCmdCh[index]
+	committedCmdCh, ok := kv.committedCmdCh[index]
 	if !ok {
-		kv.committedCmdCh[index] = make(chan Op, 1)
+		committedCmdCh = make(chan Op, 1)
+		kv.committedCmdCh[index] = committedCmdCh
 	}
 	kv.mu.Unlock()
 
 	select {
-	case committedCmd := <-kv.committedCmdCh[index]:
+	case committedCmd := <-committedCmdCh:
 		return kv.isSameCmd(cmd, committedCmd), committedCmd
 	case <-time.After(600 * time.Millisecond):
 		return false, cmd
