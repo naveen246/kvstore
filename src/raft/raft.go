@@ -497,31 +497,40 @@ func (rf *Raft) dLog(format string, args ...interface{}) {
 // closed.
 func (rf *Raft) applyChSender() {
 	for range rf.commandReadyCh {
-		// Find which entries we have to apply.
-		var entries []LogEntry
-		rf.lockMutex()
-		//savedTerm := rf.currentTerm
-		savedLastApplied := rf.lastApplied
-		if rf.commitIndex > rf.lastApplied {
-			entries = rf.logEntriesBetween(rf.lastApplied+1, rf.commitIndex+1)
-			rf.lastApplied = rf.commitIndex
-		}
-		rf.unlockMutex()
-		rf.dLog("applyChSender entries=%+v, savedLastApplied=%d", entries, savedLastApplied)
-
-		for i, entry := range entries {
-			rf.applyCh <- ApplyMsg{
-				CommandValid:  true,
-				Command:       entry.Command,
-				CommandIndex:  savedLastApplied + i + 1,
-				SnapshotValid: false,
-				Snapshot:      nil,
-				SnapshotTerm:  0,
-				SnapshotIndex: 0,
-			}
-		}
+		rf.applyCommandChSender()
 	}
 	rf.dLog("applyChSender done")
+}
+
+func (rf *Raft) applyCommandChSender() {
+	if rf.killed() {
+		return
+	}
+	// Find which entries we have to apply.
+	var entries []LogEntry
+	rf.lockMutex()
+	//savedTerm := rf.currentTerm
+	savedLastApplied := rf.lastApplied
+	if rf.commitIndex > rf.lastApplied {
+		entries = rf.logEntriesBetween(rf.lastApplied+1, rf.commitIndex+1)
+		rf.lastApplied = rf.commitIndex
+	}
+	rf.unlockMutex()
+	rf.dLog("applyChSender entries=%+v, savedLastApplied=%d", entries, savedLastApplied)
+
+	for i, entry := range entries {
+		applyMsg := ApplyMsg{
+			CommandValid:  true,
+			Command:       entry.Command,
+			CommandIndex:  savedLastApplied + i + 1,
+			SnapshotValid: false,
+			Snapshot:      nil,
+			SnapshotTerm:  0,
+			SnapshotIndex: 0,
+		}
+		rf.dLog("applyChSender Command: ApplyMsg=%+v", applyMsg)
+		rf.applyCh <- applyMsg
+	}
 }
 
 //

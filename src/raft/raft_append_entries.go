@@ -84,6 +84,9 @@ func (rf *Raft) updateLog(args AppendEntriesArgs) {
 		logInsertIndex++
 		newEntriesIndex++
 	}
+	if rf.killed() {
+		return
+	}
 	// At the end of this loop:
 	// - logInsertIndex points at the end of the logEntries, or an index where the
 	//   term mismatches with an entry from the leader
