@@ -14,10 +14,9 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-	Term             int
-	Success          bool
-	AckMatchIndex    int
-	AckSnapshotIndex int
+	Term          int
+	Success       bool
+	AckMatchIndex int
 
 	ConflictIndex int
 }
@@ -62,7 +61,6 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		prevLogEntry, indexOutOfBoundsErr := rf.logEntryAtIndex(args.PrevLogIndex)
 		logOk := rf.logLength() > args.PrevLogIndex &&
 			(args.PrevLogIndex == -1 || args.PrevLogTerm == prevLogEntry.Term) && indexOutOfBoundsErr == nil
-		reply.AckSnapshotIndex = rf.snapshotIndex
 		if logOk {
 			rf.updateLog(args)
 			reply.Success = true
@@ -255,14 +253,10 @@ func (rf *Raft) onAppendEntriesReplyFailure(peerId int, reply AppendEntriesReply
 	rf.lockMutex()
 	rf.nextIndex[peerId] = reply.ConflictIndex
 	rf.dLog("onAppendEntriesReplyFailure - peer = %d, AppendEntriesReply = %+v, rf.nextIndex = %+v, rf.matchIndex = %+v, rf.snapshotIndex = %d, rf.log = %+v", peerId, reply, rf.nextIndex, rf.matchIndex, rf.snapshotIndex, rf.logEntries)
-	if reply.AckSnapshotIndex > rf.matchIndex[peerId] {
-		rf.matchIndex[peerId] = reply.AckSnapshotIndex
-		rf.nextIndex[peerId] = reply.AckSnapshotIndex + 1
-	}
-	if reply.AckSnapshotIndex+1 > rf.nextIndex[peerId] {
-		rf.nextIndex[peerId] = reply.AckSnapshotIndex + 1
-	}
-	if rf.snapshotIndex > reply.AckSnapshotIndex && rf.currentRole == Leader {
+	if reply.AckMatchIndex+1 > rf.snapshotIndex {
+		rf.matchIndex[peerId] = reply.AckMatchIndex
+		rf.nextIndex[peerId] = reply.AckMatchIndex + 1
+	} else {
 		snapshotIndex := rf.snapshotIndex
 		snapshotTerm := rf.snapshotTerm
 		snapshot := rf.snapshot
@@ -286,7 +280,7 @@ func (rf *Raft) onAppendEntriesReplySuccess(peerId int, reply AppendEntriesReply
 		rf.matchIndex[peerId] = reply.AckMatchIndex
 		rf.nextIndex[peerId] = reply.AckMatchIndex + 1
 		rf.dLog("On AE reply success nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
-	} else if rf.nextIndex[peerId] > reply.AckSnapshotIndex+1 {
+	} else {
 		rf.dLog("decreasing nextIndex, reply from peer: %d is %+v, rf.matchIndex: %d", peerId, reply, rf.matchIndex[peerId])
 		rf.nextIndex[peerId] -= 1
 		rf.unlockMutex()
