@@ -118,8 +118,8 @@ func (rf *Raft) startElection() {
 		}(id, &votesReceived)
 	}
 
-	// Run another election ticker, in case this election is not successful.
-	go rf.ticker()
+	// Run another electionTicker, in case this election is not successful.
+	go rf.electionTicker()
 }
 
 func (rf *Raft) getRequestVoteArgs(savedCurrentTerm int) RequestVoteArgs {
