@@ -497,15 +497,15 @@ func (rf *Raft) dLog(format string, args ...interface{}) {
 // closed.
 func (rf *Raft) applyChSender() {
 	for range rf.commandReadyCh {
+		if rf.killed() {
+			return
+		}
 		rf.applyCommandChSender()
 	}
 	rf.dLog("applyChSender done")
 }
 
 func (rf *Raft) applyCommandChSender() {
-	if rf.killed() {
-		return
-	}
 	// Find which entries we have to apply.
 	var entries []LogEntry
 	rf.lockMutex()
