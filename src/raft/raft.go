@@ -383,9 +383,9 @@ func (rf *Raft) electionTimeout() time.Duration {
 	return ElectionTimeout + r
 }
 
-// The ticker goroutine starts a new election if this peer hasn't received
+// The electionTicker goroutine starts a new election if this peer hasn't received
 // heartbeats recently.
-func (rf *Raft) ticker() {
+func (rf *Raft) electionTicker() {
 	timeoutDuration := rf.electionTimeout()
 	rf.lockMutex()
 	termStarted := rf.currentTerm
@@ -395,11 +395,11 @@ func (rf *Raft) ticker() {
 	// This loops until either:
 	// - we discover the election timer is no longer needed, or
 	// - the election timer expires and this raft node becomes a candidate
-	electionTicker := time.NewTicker(ElectionTicker)
-	defer electionTicker.Stop()
+	ticker := time.NewTicker(ElectionTicker)
+	defer ticker.Stop()
 	for rf.killed() == false {
 		// Your code here to check if a leader election should be started
-		<-electionTicker.C
+		<-ticker.C
 		rf.lockMutex()
 		if rf.currentRole != Candidate && rf.currentRole != Follower {
 			rf.dLog("in election timer currentRole=%s, bailing out", rf.currentRole)
@@ -449,7 +449,7 @@ func (rf *Raft) becomeFollower(term int) {
 	rf.electionResetEvent = time.Now()
 	rf.persist()
 	rf.dLog("electionResetEvent in becomeFollower")
-	go rf.ticker()
+	go rf.electionTicker()
 }
 
 // Expects rf.mu to be locked.
@@ -561,9 +561,6 @@ func (rf *Raft) applyChSender() {
 // the client consumes new committed entries. Returns when commandReadyCh is
 // closed.
 func (rf *Raft) applyCommandChSender() {
-	if rf.killed() {
-		return
-	}
 	// Find which entries we have to apply.
 	var entries []LogEntry
 	rf.lockMutex()
@@ -666,12 +663,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
-	// start ticker goroutine to start elections
+	// start electionTicker goroutine to start elections
 	go func() {
 		rf.lockMutex()
 		rf.electionResetEvent = time.Now()
 		rf.unlockMutex()
-		rf.ticker()
+		rf.electionTicker()
 	}()
 
 	go rf.applyChSender()

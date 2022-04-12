@@ -169,6 +169,9 @@ func (rf *Raft) leaderSendAEs(currentTerm int) {
 }
 
 func (rf *Raft) replicateLog(peerId int, leaderCurrentTerm int) {
+	if rf.killed() {
+		return
+	}
 	rf.dLog("Created goroutine from leaderSendAEs for peerId:%d\n", peerId)
 	rf.lockMutex()
 	rf.dLog("reading nextIndex[%d] = %d", peerId, rf.nextIndex[peerId])
@@ -203,7 +206,7 @@ func (rf *Raft) replicateLog(peerId int, leaderCurrentTerm int) {
 }
 
 // Expects rf.mu to be locked.
-func (rf *Raft) getAppendEntriesArgs(peerNextIndex int, savedCurrentTerm int) AppendEntriesArgs {
+func (rf *Raft) getAppendEntriesArgs(peerNextIndex int, leaderCurrentTerm int) AppendEntriesArgs {
 	entries := rf.logEntriesBetween(peerNextIndex, rf.logLength())
 	prevLogIndex := peerNextIndex - 1
 	prevLogTerm := -1
@@ -213,7 +216,7 @@ func (rf *Raft) getAppendEntriesArgs(peerNextIndex int, savedCurrentTerm int) Ap
 	}
 
 	args := AppendEntriesArgs{
-		Term:         savedCurrentTerm,
+		Term:         leaderCurrentTerm,
 		LeaderId:     rf.me,
 		PrevLogIndex: prevLogIndex,
 		PrevLogTerm:  prevLogTerm,
