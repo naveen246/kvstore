@@ -118,6 +118,11 @@ type Raft struct {
 	// on applyCh.
 	commandReadyCh chan struct{}
 
+	// snapshotReadyCh is an internal notification channel used by goroutines
+	// that create snapshot to notify that the snapshot entry may be sent
+	// on applyCh.
+	snapshotReadyCh chan struct{}
+
 	// triggerAECh is an internal notification channel used to trigger
 	// sending new AEs to followers when interesting changes occurred.
 	triggerAECh chan struct{}
@@ -127,24 +132,28 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	// Persistent raft state on all servers
+
 	currentTerm int
 	votedFor    int
 	logEntries  []LogEntry
-
 	// index of the highest log entry known to be committed
 	// commitIndex on leader is set to max logIndex at which LogEntry matches the majority of peers
 	// commitIndex on follower is set to min(leaderCommitIndex, logLength-1)
-	commitIndex int
+	commitIndex   int
+	snapshotTerm  int
+	snapshotIndex int
 
 	// Volatile raft state on all servers
+
 	// lastApplied is the index of last logEntry that has been sent on applyCh channel back to client.
 	lastApplied int
-
 	// currentRole can be Follower, Candidate or Leader
 	currentRole        NodeState
 	electionResetEvent time.Time
+	snapshot           []byte
 
 	// Volatile raft state on leaders
+
 	// nextIndex[peerId] for each server, index of the next log entry to send to that server
 	nextIndex map[int]int
 	// matchIndex[peerId] for each server, index of the highest log entry known to be replicated on server
@@ -155,25 +164,44 @@ type Raft struct {
 // (or -1 if there's no logEntries) for this server.
 // Expects rf.mu to be locked.
 func (rf *Raft) lastLogIndexAndTerm() (int, int) {
+	lastIndex, lastTerm := -1, -1
 	if rf.logLength() > 0 {
-		lastIndex := rf.logLength() - 1
-		lastTerm := rf.logEntryAtIndex(lastIndex).Term
-		return lastIndex, lastTerm
+		if len(rf.logEntries) > 0 {
+			lastIndex = rf.logLength() - 1
+			lastTerm = rf.logEntries[lastIndex-rf.snapshotLength()].Term
+		} else {
+			lastIndex = rf.snapshotIndex
+			lastTerm = rf.snapshotTerm
+		}
 	}
-	return -1, -1
+	return lastIndex, lastTerm
 }
 
-func (rf *Raft) logEntryAtIndex(index int) LogEntry {
-	return rf.logEntries[index]
+func (rf *Raft) logEntryAtIndex(index int) (LogEntry, error) {
+	if index < rf.snapshotIndex || index >= rf.logLength() {
+		return LogEntry{Term: -1}, errors.New("index out of bounds")
+	} else if index == rf.snapshotIndex {
+		return LogEntry{Term: rf.snapshotTerm}, nil
+	}
+	return rf.logEntries[index-rf.snapshotLength()], nil
 }
 
 // logEntriesBetween returns slice starting at and including startIndex upto and excluding endIndex
 func (rf *Raft) logEntriesBetween(startIndex int, endIndex int) []LogEntry {
+	startIndex -= rf.snapshotLength()
+	endIndex -= rf.snapshotLength()
+	if startIndex < 0 || endIndex < 0 || startIndex >= endIndex {
+		return []LogEntry{}
+	}
 	return rf.logEntries[startIndex:endIndex]
 }
 
 func (rf *Raft) logLength() int {
-	return len(rf.logEntries)
+	return rf.snapshotLength() + len(rf.logEntries)
+}
+
+func (rf *Raft) snapshotLength() int {
+	return rf.snapshotIndex + 1
 }
 
 // GetState : return currentTerm and whether this server
@@ -208,10 +236,14 @@ func (rf *Raft) persist() {
 	logFatal(err)
 	err = e.Encode(rf.commitIndex)
 	logFatal(err)
+	err = e.Encode(rf.snapshotIndex)
+	logFatal(err)
+	err = e.Encode(rf.snapshotTerm)
+	logFatal(err)
 
 	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
-	rf.dLog("persist(): time elapsed since electionResetEvent - %+v", time.Since(rf.electionResetEvent))
+	rf.persister.SaveStateAndSnapshot(data, rf.snapshot)
+	rf.dLog("persist(): time elapsed since electionResetEvent: %+v", time.Since(rf.electionResetEvent))
 }
 
 //
@@ -229,17 +261,24 @@ func (rf *Raft) readPersist(data []byte) {
 	var votedFor int
 	var logEntries []LogEntry
 	var commitIndex int
+	var snapshotIndex int
+	var snapshotTerm int
 	if d.Decode(&currentTerm) != nil ||
 		d.Decode(&votedFor) != nil ||
 		d.Decode(&logEntries) != nil ||
-		d.Decode(&commitIndex) != nil {
+		d.Decode(&commitIndex) != nil ||
+		d.Decode(&snapshotIndex) != nil ||
+		d.Decode(&snapshotTerm) != nil {
 		logFatal(errors.New("error while decoding persisted data"))
 	} else {
 		rf.currentTerm = currentTerm
 		rf.votedFor = votedFor
 		rf.logEntries = logEntries
 		rf.commitIndex = commitIndex
+		rf.snapshotIndex = snapshotIndex
+		rf.snapshotTerm = snapshotTerm
 	}
+	rf.snapshot = rf.persister.ReadSnapshot()
 }
 
 //
@@ -257,6 +296,15 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // that index. Raft should now trim its logEntries as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.lockMutex()
+	logEntry, err := rf.logEntryAtIndex(index)
+	currentRole := rf.currentRole
+	rf.unlockMutex()
+	if !rf.killed() && err == nil && currentRole == Leader {
+		for peerId := range rf.peers {
+			go rf.snapshotToPeer(peerId, index, logEntry.Term, snapshot)
+		}
+	}
 }
 
 //
@@ -293,6 +341,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		term = rf.currentTerm
 		isLeader = true
 		rf.matchIndex[rf.me] = index
+		rf.nextIndex[rf.me] = index + 1
 		rf.unlockMutex()
 		rf.dLog("Start agreement: Send to triggerAECh channel")
 		rf.triggerAECh <- struct{}{}
@@ -319,6 +368,7 @@ func (rf *Raft) Kill() {
 	rf.dLog("node dead")
 	rf.lockMutex()
 	close(rf.commandReadyCh)
+	close(rf.snapshotReadyCh)
 	rf.unlockMutex()
 }
 
@@ -489,34 +539,44 @@ func (rf *Raft) dLog(format string, args ...interface{}) {
 	}
 }
 
-// applyChSender is responsible for sending committed entries on
+func (rf *Raft) applyChSender() {
+	for {
+		if rf.killed() {
+			return
+		}
+
+		select {
+		case <-rf.snapshotReadyCh:
+			rf.applySnapshotChSender()
+		case <-rf.commandReadyCh:
+			rf.applyCommandChSender()
+		}
+	}
+}
+
+// applyCommandChSender is responsible for sending committed entries on
 // rf.applyCh. It watches commandReadyCh for notifications and calculates
 // which new entries are ready to be sent. This method should run in a separate
 // background goroutine; rf.applyCh may be buffered and will limit how fast
 // the client consumes new committed entries. Returns when commandReadyCh is
 // closed.
-func (rf *Raft) applyChSender() {
-	for range rf.commandReadyCh {
-		if rf.killed() {
-			return
-		}
-		rf.applyCommandChSender()
-	}
-	rf.dLog("applyChSender done")
-}
-
 func (rf *Raft) applyCommandChSender() {
 	// Find which entries we have to apply.
 	var entries []LogEntry
 	rf.lockMutex()
-	//savedTerm := rf.currentTerm
+	if rf.lastApplied < rf.snapshotIndex {
+		rf.snapshotReadyCh <- struct{}{}
+		rf.unlockMutex()
+		return
+	}
 	savedLastApplied := rf.lastApplied
+	rf.dLog("Before applyCh rf.lastApplied: %d, rf.commitIndex: %d, rf.snapshotIndex: %d, rf.logEntries: %+v", rf.lastApplied, rf.commitIndex, rf.snapshotIndex, rf.logEntries)
 	if rf.commitIndex > rf.lastApplied {
 		entries = rf.logEntriesBetween(rf.lastApplied+1, rf.commitIndex+1)
 		rf.lastApplied = rf.commitIndex
+		rf.dLog("applyCommandChSender: rf.lastApplied is set to %d", rf.lastApplied)
 	}
 	rf.unlockMutex()
-	rf.dLog("applyChSender entries=%+v, savedLastApplied=%d", entries, savedLastApplied)
 
 	for i, entry := range entries {
 		applyMsg := ApplyMsg{
@@ -530,6 +590,33 @@ func (rf *Raft) applyCommandChSender() {
 		}
 		rf.dLog("applyChSender Command: ApplyMsg=%+v", applyMsg)
 		rf.applyCh <- applyMsg
+	}
+}
+
+func (rf *Raft) applySnapshotChSender() {
+	if rf.killed() {
+		return
+	}
+	rf.lockMutex()
+	snapshot := rf.snapshot
+	snapshotIndex := rf.snapshotIndex
+	snapshotTerm := rf.snapshotTerm
+	if rf.snapshotIndex >= 0 {
+		rf.lastApplied = rf.snapshotIndex
+		rf.dLog("applySnapshotChSender: rf.lastApplied is set to %d", rf.lastApplied)
+	}
+	rf.unlockMutex()
+	if snapshotIndex >= 0 {
+		rf.dLog("applyChSender Snapshot: snapshotIndex=%d, snapshotTerm=%d", snapshotIndex, snapshotTerm)
+		rf.applyCh <- ApplyMsg{
+			CommandValid:  false,
+			Command:       nil,
+			CommandIndex:  -1,
+			SnapshotValid: true,
+			Snapshot:      snapshot,
+			SnapshotTerm:  snapshotTerm,
+			SnapshotIndex: snapshotIndex,
+		}
 	}
 }
 
@@ -552,6 +639,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.applyCh = applyCh
 	rf.commandReadyCh = make(chan struct{}, 16)
+	rf.snapshotReadyCh = make(chan struct{}, 16)
 	rf.triggerAECh = make(chan struct{}, 1)
 
 	rf.currentTerm = 0
@@ -560,11 +648,13 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		Command: byte(1),
 		Term:    0,
 	}}
-	rf.commitIndex = -1
+	rf.commitIndex = 0
 	rf.currentRole = Follower
-	rf.lastApplied = -1
+	rf.lastApplied = 0
 	rf.nextIndex = make(map[int]int)
 	rf.matchIndex = make(map[int]int)
+	rf.snapshotIndex = -1
+	rf.snapshotTerm = -1
 
 	atomic.StoreInt32(&rf.dead, 0)
 
